@@ -1,20 +1,21 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const { apiKey, apiSecret, isPaper, symbol, qty, side, type = "market", timeInForce = "day" } = await req.json();
+    const body = await req.json();
+    const { apiKey, apiSecret, isPaper, symbol, qty, side } = body;
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
-        { error: "Alpaca API Key and Secret are required to execute dynamic trades." },
-        { status: 400 }
+        { error: "API credentials are missing." },
+        { status: 200 }
       );
     }
 
-    if (!symbol || !qty || !side) {
+    if (!symbol || !qty || parseFloat(qty) <= 0 || !["buy", "sell"].includes(side)) {
       return NextResponse.json(
-        { error: "Symbol, qty, and side are required for order execution." },
-        { status: 400 }
+        { error: "Invalid trading parameters. Verify symbol, Quantity, and Action." },
+        { status: 200 }
       );
     }
 
@@ -26,38 +27,45 @@ export async function POST(req: NextRequest) {
       "APCA-API-KEY-ID": apiKey,
       "APCA-API-SECRET-KEY": apiSecret,
       "Content-Type": "application/json",
+      "User-Agent": "Alpaca-Margin-Terminal/1.0",
     };
 
-    // Construct Alpaca Order Payload
     const payload = {
       symbol: symbol.toUpperCase(),
-      qty: String(qty),
-      side: side.toLowerCase(),
-      type: type.toLowerCase(),
-      time_in_force: timeInForce.toLowerCase(),
+      qty: qty.toString(), // Convert to string in order to support fractional quantities correctly
+      side: side,
+      type: "market",
+      time_in_force: "day",
     };
 
-    const response = await fetch(`${baseUrl}/v2/orders`, {
+    const orderRes = await fetch(`${baseUrl}/v2/orders`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
+    if (!orderRes.ok) {
+      const errorText = await orderRes.text();
+      let parsedErr;
+      try {
+        parsedErr = JSON.parse(errorText);
+      } catch (e) {
+        parsedErr = null;
+      }
+      const message = parsedErr?.message || errorText || "Alpaca rejected order.";
       return NextResponse.json(
-        { error: `Alpaca execution rejected: ${errorText || response.statusText}` },
-        { status: response.status }
+        { error: `Alpaca rejection: ${message}` },
+        { status: 200 }
       );
     }
 
-    const orderData = await response.json();
-    return NextResponse.json(orderData);
+    const orderResponseData = await orderRes.json();
+    return NextResponse.json(orderResponseData);
   } catch (error: any) {
     console.error("Alpaca Order Proxy Error:", error);
     return NextResponse.json(
-      { error: error?.message || "An unexpected error occurred during execution." },
-      { status: 500 }
+      { error: error?.message || "Internal transmission failure to Alpaca broker." },
+      { status: 200 }
     );
   }
 }

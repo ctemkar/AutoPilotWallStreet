@@ -1,50 +1,31 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
-  ShieldCheck,
-  ShieldAlert,
-  Sliders,
-  DollarSign,
+  RefreshCw,
+  Trash2,
+  Settings,
+  Code,
   TrendingUp,
   TrendingDown,
-  Activity,
   AlertTriangle,
-  Flame,
-  Zap,
-  RefreshCw,
+  CheckCircle,
+  DollarSign,
+  Sliders,
+  ShieldAlert,
+  Sparkles,
+  Cpu,
   Eye,
   EyeOff,
-  Terminal,
-  Compass,
-  ArrowUpRight,
-  ChevronRight,
-  Sparkles,
-  Info,
-  Play,
-  Pause,
-  Skull,
+  Copy,
+  ExternalLink,
   Plus,
-  Target,
-  Settings,
+  Play,
+  RotateCcw,
+  Zap
 } from "lucide-react";
-import {
-  AreaChart,
-  Area,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceLine,
-} from "recharts";
-import PositionsTable from "@/components/PositionsTable";
-import RiskAnalysis from "@/components/RiskAnalysis";
-import PythonExporter from "@/components/PythonExporter";
-import AlertSettings, { AlertLogItem } from "@/components/AlertSettings";
 
-// Type definitions
+// Types
 interface Position {
   symbol: string;
   qty: number;
@@ -53,713 +34,814 @@ interface Position {
   market_value: number;
   unrealized_pl: number;
   unrealized_plpc: number;
-  side: "long" | "short";
   maintenance_margin_rate: number;
-  realized_pnl?: number;
 }
 
-interface AlgoOrder {
+interface Order {
   id: string;
   symbol: string;
   side: "BUY" | "SELL";
   qty: number;
   price: number;
-  status: "FILLED" | "PENDING" | "REJECTED" | "CANCELLED";
+  status: string;
   submittedAt: string;
-  strategyTag: string;
-  type: "MARKET" | "LIMIT";
 }
 
-interface AlgoFill {
-  id: string;
-  symbol: string;
-  side: "BUY" | "SELL";
-  qty: number;
-  price: number;
-  pnlImpact: number;
-  filledAt: string;
-}
-
-interface DailyPnlItem {
-  time: string;
-  realizedPnl: number;
-  unrealizedPnl: number;
-  equity: number;
-  maxDrawdown: number;
-}
-
-interface RiskLogItem {
+interface Log {
   id: string;
   timestamp: string;
   symbol: string;
   action: string;
-  passed: boolean;
-  details: string;
+  message: string;
+  status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO";
 }
 
-export default function Page() {
-  // Mode selection: "mock" or "real"
-  const [mode, setMode] = useState<"mock" | "real">("real");
+export default function Home() {
+  // Alpaca States API key configuration
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [showApiSecret, setShowApiSecret] = useState(false);
+  const [isPaper, setIsPaper] = useState(true);
+  const [useAlpacaLive, setUseAlpacaLive] = useState(false);
 
-  // Real credentials from localStorage
-  const [apiKey, setApiKey] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        return localStorage.getItem("apca_api_key") || "";
-      } catch (e) {
-        console.error("Local storage read error for apiKey:", e);
-      }
-    }
-    return "";
-  });
-  const [apiSecret, setApiSecret] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        return localStorage.getItem("apca_api_secret") || "";
-      } catch (e) {
-        console.error("Local storage read error for apiSecret:", e);
-      }
-    }
-    return "";
-  });
-  const [isPaper, setIsPaper] = useState<boolean>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        return localStorage.getItem("apca_is_paper") !== "false";
-      } catch (e) {
-        console.error("Local storage read error for isPaper:", e);
-      }
-    }
-    return true;
-  });
-  const [showSecret, setShowSecret] = useState(false);
+  // Connection & loading flags
+  const [isConnecting, setIsConnecting] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
-  const [errorText, setErrorText] = useState<string | null>(null);
+  const [isPlacingOrder, setIsPlacingOrder] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [orderError, setOrderError] = useState("");
+  const [orderSuccess, setOrderSuccess] = useState("");
 
-  // Save to localStorage when changed
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      try {
-        localStorage.setItem("apca_api_key", apiKey);
-        localStorage.setItem("apca_api_secret", apiSecret);
-        localStorage.setItem("apca_is_paper", String(isPaper));
-      } catch (e) {
-        console.error("Local storage save error:", e);
-      }
-    }
-  }, [apiKey, apiSecret, isPaper]);
-
-  // Sentry limits State
-  const [warningThreshold, setWarningThreshold] = useState(25); // Target safe limit
-  const [criticalThreshold, setCriticalThreshold] = useState(80); // Liquidation threat limit
-
-  // CORE PORTFOLIO ENGINE STATES
-  const startOfDayEquity = 120975.0;
-  const [equity, setEquity] = useState(120975.0);
-  
-  const [cash, setCashState] = useState(44775.0);
-  const cashRef = useRef(44775.0);
-  const setCash = (val: number | ((prev: number) => number)) => {
-    if (typeof val === "function") {
-      setCashState((prev) => {
-        const next = val(prev);
-        cashRef.current = next;
-        return next;
-      });
-    } else {
-      cashRef.current = val;
-      setCashState(val);
-    }
-  };
-
-  const [maintenanceMargin, setMaintenanceMargin] = useState(25972.5);
-  const [initialMargin, setInitialMargin] = useState(31500.0);
-  const [dayTradingBP, setDayTradingBP] = useState(483900.0);
-  const [regTBP, setRegTBP] = useState(241950.0);
-  const [pdtCount, setPdtCount] = useState(2);
-  const [multiplier, setMultiplier] = useState("4");
-  const [isPdt, setIsPdt] = useState(true);
-
-  // Portfolio Accounting variables
-  const [totalRealizedPnl, setTotalRealizedPnlState] = useState(1250.0);
-  const totalRealizedPnlRef = useRef(1250.0);
-  const setTotalRealizedPnl = (val: number | ((prev: number) => number)) => {
-    if (typeof val === "function") {
-      setTotalRealizedPnlState((prev) => {
-        const next = val(prev);
-        totalRealizedPnlRef.current = next;
-        return next;
-      });
-    } else {
-      totalRealizedPnlRef.current = val;
-      setTotalRealizedPnlState(val);
-    }
-  };
-
-  // Position holds
-  const [positions, setPositions] = useState<Position[]>([
-    {
-      symbol: "AAPL",
-      qty: 150,
-      avg_entry_price: 172.5,
-      current_price: 175.0,
-      market_value: 26250,
-      unrealized_pl: 375,
-      unrealized_plpc: 0.0145,
-      side: "long",
-      maintenance_margin_rate: 0.25,
-      realized_pnl: 420.0,
-    },
+  // Simulated (Paper Setup) Parameters
+  const [simCash, setSimCash] = useState(100000);
+  const [simLeverageLimit, setSimLeverageLimit] = useState(4); // 4x leverage limit
+  const [simMaintRate, setSimMaintRate] = useState(30); // 30% maintenance rate default
+  const [mockPositions, setMockPositions] = useState<Position[]>([
     {
       symbol: "NVDA",
-      qty: 45,
-      avg_entry_price: 800.0,
-      current_price: 850.0,
-      market_value: 38250,
-      unrealized_pl: 2250,
-      unrealized_plpc: 0.0625,
-      side: "long",
-      maintenance_margin_rate: 0.40,
-      realized_pnl: 830.0,
+      qty: 150,
+      avg_entry_price: 110.0,
+      current_price: 115.5,
+      market_value: 17325.0,
+      unrealized_pl: 825.0,
+      unrealized_plpc: 0.05,
+      maintenance_margin_rate: 0.35,
+    },
+    {
+      symbol: "AAPL",
+      qty: 200,
+      avg_entry_price: 180.0,
+      current_price: 182.2,
+      market_value: 36440.0,
+      unrealized_pl: 440.0,
+      unrealized_plpc: 0.012,
+      maintenance_margin_rate: 0.30,
     },
     {
       symbol: "TSLA",
       qty: 60,
-      avg_entry_price: 210.0,
+      avg_entry_price: 220.0,
       current_price: 195.0,
-      market_value: 11700,
-      unrealized_pl: -900,
-      unrealized_plpc: -0.0714,
-      side: "long",
-      maintenance_margin_rate: 0.35,
-      realized_pnl: 0.0,
-    },
-  ]);
-
-  // AUTOMATED TRADING LOGIC CONFIGS
-  const [autoTradingActive, setAutoTradingActive] = useState(false);
-  const [autoTradingStatus, setAutoTradingStatus] = useState<"RUNNING" | "PAUSED" | "HALTED">("PAUSED");
-  const [selectedStrategy, setSelectedStrategy] = useState("MOMENTUM_TRADER_V4");
-  const [watchlist, setWatchlist] = useState<string[]>(["AAPL", "NVDA", "TSLA", "MSFT", "AMZN"]);
-  const [maxCapitalPerTradePct, setMaxCapitalPerTradePct] = useState(15);
-  const [stopLossPct, setStopLossPct] = useState(3.0);
-  const [takeProfitPct, setTakeProfitPct] = useState(6.0);
-  const [maxOpenPositions, setMaxOpenPositions] = useState(5);
-  const [strategyEnabled, setStrategyEnabled] = useState(true);
-
-  // RISK PROTECTIONS SLIDERS
-  const [maxDailyLossPct, setMaxDailyLossPct] = useState(4.0);
-  const [maxLeverage, setMaxLeverage] = useState(3.5);
-  const [maxPositionSizePct, setMaxPositionSizePct] = useState(25);
-  const [riskCheckLog, setRiskCheckLog] = useState<RiskLogItem[]>([
-    {
-      id: "risk-init",
-      timestamp: new Date().toLocaleTimeString(),
-      symbol: "SYS",
-      action: "INIT_SECURITIES",
-      passed: true,
-      details: "Sentry Core protection engine online. Margin limits verified.",
+      market_value: 11700.0,
+      unrealized_pl: -1500.0,
+      unrealized_plpc: -0.1136,
+      maintenance_margin_rate: 0.40,
     },
     {
-      id: "risk-init-lev",
-      timestamp: new Date().toLocaleTimeString(),
-      symbol: "SYS",
-      action: "LEVERAGE_GUIDE",
-      passed: true,
-      details: "Current leverage is 1.45x, within target max limit coefficient.",
-    },
+      symbol: "BTCUSD",
+      qty: 0.5,
+      avg_entry_price: 65000.0,
+      current_price: 67200.0,
+      market_value: 33600.0,
+      unrealized_pl: 1100.0,
+      unrealized_plpc: 0.0338,
+      maintenance_margin_rate: 0.50,
+    }
   ]);
 
-  // Real-time market state arrays to simulate standard SMA values
-  const [tickerPrices, setTickerPrices] = useState<{ [symbol: string]: number }>({
-    AAPL: 175.0,
-    NVDA: 850.0,
-    TSLA: 195.0,
-    MSFT: 420.0,
-    AMZN: 180.0,
-  });
+  // General Settings & Alerts
+  const [warnThreshold, setWarnThreshold] = useState(70); // %
+  const [criticalThreshold, setCriticalThreshold] = useState(85); // %
 
-  const [priceHistories, setPriceHistories] = useState<{ [symbol: string]: number[] }>(() => {
-    const initial: { [symbol: string]: number[] } = {};
-    const bases: { [sym: string]: number } = {
-      AAPL: 175.0,
-      NVDA: 850.0,
-      TSLA: 195.0,
-      MSFT: 420.0,
-      AMZN: 180.0,
-    };
-    Object.keys(bases).forEach((sym) => {
-      let price = bases[sym];
-      const arr: number[] = [];
-      for (let i = 0; i < 60; i++) {
-        price = price + Math.sin(i / 4) * 1.5 + (Math.random() - 0.48) * 0.5;
-        arr.push(Number(price.toFixed(2)));
+  // Terminal state
+  const [orderSymbol, setOrderSymbol] = useState("AAPL");
+  const [orderQty, setOrderQty] = useState("10");
+
+  // Custom simulator entry
+  const [newSymbol, setNewSymbol] = useState("");
+  const [newQty, setNewQty] = useState("");
+  const [newPrice, setNewPrice] = useState("");
+  const [newMaint, setNewMaint] = useState("30");
+
+  // Active Alpaca positions
+  const [alpacaPositions, setAlpacaPositions] = useState<Position[]>([]);
+  const [alpacaAccount, setAlpacaAccount] = useState<any>(null);
+
+  // Orders and log tracking
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [logs, setLogs] = useState<Log[]>([]);
+
+  // AI Stress Diagnosis state
+  const [aiAnalysis, setAiAnalysis] = useState("");
+  const [isAiLoading, setIsAiLoading] = useState(false);
+
+  // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
+  const [isAutopilotActive, setIsAutopilotActive] = useState(false);
+  const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER">("GEMINI_AI");
+  const [autopilotInterval, setAutopilotInterval] = useState(15); // in seconds
+  const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
+  const [autopilotLogs, setAutopilotLogs] = useState<{ id: string; time: string; msg: string; type: "info" | "success" | "warn" | "trade" }[]>([
+    {
+      id: "init",
+      time: new Date().toLocaleTimeString(),
+      msg: "System load successful. Autopilot engine initialized offline. Configure credentials or select simulated asset.",
+      type: "info"
+    }
+  ]);
+  const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
+  const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
+  const [isTickStreamActive, setIsTickStreamActive] = useState(true);
+
+  // Refresh data proxy
+  const handleRefreshData = useCallback(async () => {
+    if (!useAlpacaLive || !apiKey || !apiSecret) return;
+    setIsRefreshing(true);
+    try {
+      const response = await fetch("/api/alpaca", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey, apiSecret, isPaper }),
+      });
+
+      const resText = await response.text();
+      let rawData: any = null;
+      try {
+        rawData = JSON.parse(resText);
+      } catch (e) {
+        throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
       }
-      initial[sym] = arr;
-    });
-    return initial;
+
+      if (!response.ok || rawData?.error) {
+        throw new Error(rawData?.error || `Unable to sync positions.`);
+      }
+
+      setAlpacaAccount(rawData.account);
+      setAlpacaPositions(rawData.positions);
+      addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
+    } catch (err: any) {
+      console.error(err);
+      addLog("ALPACA", "SYNC_ERROR", `Data stream refresh interrupted: ${err.message || err}`, "WARNING");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [useAlpacaLive, apiKey, apiSecret, isPaper]);
+
+  // Stable state ref to bypass interval recreate throttling
+  const stateRef = React.useRef<any>({
+    useAlpacaLive,
+    alpacaPositions,
+    mockPositions,
+    simCash,
+    isConnected,
+    isPaper,
+    apiKey,
+    apiSecret,
+    autopilotStrategy,
+    autopilotTargetTicker,
+    warnThreshold,
+    isAutopilotRunning,
+    alpacaAccount,
+    handleRefreshData
   });
 
-  // Orders and executions tracking list
-  const [orders, setOrders] = useState<AlgoOrder[]>([
-    {
-      id: "ord-initial-1",
-      symbol: "NVDA",
-      side: "BUY",
-      qty: 45,
-      price: 800.0,
-      status: "FILLED",
-      submittedAt: "09:32:15",
-      strategyTag: "MOMENTUM_TRADER_V4",
-      type: "MARKET",
-    },
-    {
-      id: "ord-initial-2",
-      symbol: "MSFT",
-      side: "SELL",
-      qty: 40,
-      price: 410.0,
-      status: "FILLED",
-      submittedAt: "10:14:50",
-      strategyTag: "MOMENTUM_TRADER_V4",
-      type: "MARKET",
-    },
+  useEffect(() => {
+    stateRef.current = {
+      useAlpacaLive,
+      alpacaPositions,
+      mockPositions,
+      simCash,
+      isConnected,
+      isPaper,
+      apiKey,
+      apiSecret,
+      autopilotStrategy,
+      autopilotTargetTicker,
+      warnThreshold,
+      isAutopilotRunning,
+      alpacaAccount,
+      handleRefreshData
+    };
+  }, [
+    useAlpacaLive,
+    alpacaPositions,
+    mockPositions,
+    simCash,
+    isConnected,
+    isPaper,
+    apiKey,
+    apiSecret,
+    autopilotStrategy,
+    autopilotTargetTicker,
+    warnThreshold,
+    isAutopilotRunning,
+    alpacaAccount,
+    handleRefreshData
   ]);
 
-  const [recentFills, setRecentFills] = useState<AlgoFill[]>([
-    {
-      id: "fill-initial-1",
-      symbol: "NVDA",
-      side: "BUY",
-      qty: 45,
-      price: 800.0,
-      pnlImpact: 0,
-      filledAt: "09:32:15",
-    },
-    {
-      id: "fill-initial-2",
-      symbol: "MSFT",
-      side: "SELL",
-      qty: 40,
-      price: 418.5,
-      pnlImpact: 340.0,
-      filledAt: "10:14:50",
-    },
-  ]);
+  const addAutopilotLog = (msg: string, type: "info" | "success" | "warn" | "trade") => {
+    const newLog = {
+      id: Math.random().toString(),
+      time: new Date().toLocaleTimeString(),
+      msg,
+      type
+    };
+    setAutopilotLogs((prev) => [newLog, ...prev].slice(0, 50));
+  };
 
-  // HISTORICAL CHARTS FOR RECHARTS
-  const [history, setHistory] = useState<any[]>(() => {
-    const now = new Date();
-    return Array.from({ length: 15 }).map((_, i) => {
-      const timeStr = new Date(now.getTime() - (15 - i) * 10000).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
-      const fluctuator = Math.sin(i / 2) * 1200;
-      return {
-        time: timeStr,
-        equity: 120975.0 + fluctuator,
-        maintenanceMargin: 25972.5 + fluctuator * 0.15,
-        cushion: 120975.0 + fluctuator - (25972.5 + fluctuator * 0.15),
-      };
-    });
-  });
+  const executeAutopilotOrder = useCallback(async (symbolClean: string, side: "BUY" | "SELL", qtyNum: number) => {
+    const curRef = stateRef.current;
+    if (qtyNum <= 0) return;
+    symbolClean = symbolClean.toUpperCase().trim();
 
-  const [dailyPnlHistory, setDailyPnlHistory] = useState<DailyPnlItem[]>(() => {
-    const now = new Date();
-    return Array.from({ length: 15 }).map((_, i) => {
-      const timeStr = new Date(now.getTime() - (15 - i) * 10000).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
-      return {
-        time: timeStr,
-        realizedPnl: 1000.0 + i * 20,
-        unrealizedPnl: Math.sin(i / 2) * 500,
-        equity: 120000.0 + i * 100 + Math.sin(i / 2) * 400,
-        maxDrawdown: 0.15,
-      };
-    });
-  });
+    if (curRef.useAlpacaLive) {
+      if (!curRef.isConnected) {
+        addAutopilotLog(`Blocked automated order: credentials are disconnected.`, "warn");
+        return;
+      }
 
-  // Alert Sentry Logs List
-  const [alerts, setAlerts] = useState<AlertLogItem[]>([]);
+      let finalQty = qtyNum;
 
-  // TABS SWAP
-  const [activeTab, setActiveTab] = useState<"positions" | "executions" | "analysis" | "python" | "settings">("positions");
+      if (side === "BUY") {
+        let estPrice = 150.0;
+        const matchedTicker = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
+        if (matchedTicker) {
+          estPrice = matchedTicker.current_price;
+        } else {
+          if (symbolClean === "AAPL") estPrice = 182.2;
+          else if (symbolClean === "TSLA") estPrice = 195.0;
+          else if (symbolClean === "NVDA") estPrice = 115.5;
+          else if (symbolClean === "BTCUSD") estPrice = 67200.0;
+          else if (symbolClean === "MSFT") estPrice = 425.0;
+        }
 
-  const [lastRefreshed, setLastRefreshed] = useState<string>(() => new Date().toLocaleTimeString());
-  const [isRefreshing, setIsRefreshing] = useState(false);
+        const estimatedCost = estPrice * qtyNum;
+        const maxAllowedPower = parseFloat(curRef.alpacaAccount?.buying_power || curRef.alpacaAccount?.cash || "0");
+        const maxSafeOrderVal = maxAllowedPower * 0.70; // enforce a 30% safety collar/buffer for fractional buy orders
 
-  // Prevent multiple redundant trigger alert checks
-  const cooldownRef = useRef<{ [key: string]: number }>({});
+        if (estimatedCost > maxSafeOrderVal) {
+          const maxAffordableQty = maxSafeOrderVal / estPrice;
+          if (maxAffordableQty >= 0.0001) {
+            const safeQty = maxAffordableQty;
+            if (symbolClean === "BTCUSD") {
+              finalQty = parseFloat(safeQty.toFixed(4));
+            } else {
+              finalQty = parseFloat(safeQty.toFixed(2));
+            }
 
-  const addRiskLog = (symbol: string, action: string, passed: boolean, details: string) => {
-    const newItem: RiskLogItem = {
-      id: `risk-item-${Date.now()}-${Math.random()}`,
+            if (finalQty <= (symbolClean === "BTCUSD" ? 0.0005 : 0.05)) {
+              addAutopilotLog(`Blocked live automated BUY: Affordable size ${finalQty} for ${symbolClean} is negligible. BP: ${maxAllowedPower.toFixed(2)} (safe cap: ${maxSafeOrderVal.toFixed(2)}), price: ${estPrice.toFixed(2)}.`, "warn");
+              addLog(symbolClean, "AUTO_BUY_BLOCKED", `Affordable size ${finalQty} is too small to execute. Balance: ${maxAllowedPower.toFixed(2)}.`, "WARNING");
+              return;
+            } else {
+              addAutopilotLog(`Leverage Control: Out of buying power / buffer cushion for ${qtyNum} ${symbolClean} (~${estimatedCost.toFixed(2)}). Rescaled down to ${finalQty} (~${(estPrice * finalQty).toFixed(2)}) based on ${maxSafeOrderVal.toFixed(2)} maximum safe order limit (30% buffer).`, "info");
+            }
+          } else {
+            addAutopilotLog(`Blocked live automated BUY: Insufficient buying power buffer. Cost for ${qtyNum} ${symbolClean} is ~${estimatedCost.toFixed(2)} with safe maximum limit of ${maxSafeOrderVal.toFixed(2)} (total BP: ${maxAllowedPower.toFixed(2)}).`, "warn");
+            addLog(symbolClean, "AUTO_BUY_BLOCKED", `Insufficient buying power: ${maxAllowedPower.toFixed(2)} available vs ${estimatedCost.toFixed(2)} required.`, "WARNING");
+            return;
+          }
+        }
+      }
+
+      addAutopilotLog(`[Bot Order] Queueing live brokerage market ${side} of ${finalQty} ${symbolClean}...`, "trade");
+      addLog("AUTOPILOT", side, `Transmitting Bot Order: ${side} ${finalQty} shares of ${symbolClean}`, "INFO");
+      try {
+        const response = await fetch("/api/alpaca/trade", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            apiKey: curRef.apiKey,
+            apiSecret: curRef.apiSecret,
+            isPaper: curRef.isPaper,
+            symbol: symbolClean,
+            qty: finalQty,
+            side: side.toLowerCase(),
+          }),
+        });
+
+        const resText = await response.text();
+        let dataOrder: any = null;
+        try {
+          dataOrder = JSON.parse(resText);
+        } catch (e) {
+          throw new Error(`Server returned HTML/text error output: ${resText.slice(0, 120).trim()}...`);
+        }
+
+        if (!response.ok || dataOrder?.error) {
+          throw new Error(dataOrder?.error || "Brokerage error response");
+        }
+
+        addAutopilotLog(`Automated Live Order FILLED! ID: ${dataOrder.id || "Success"}.`, "success");
+        addLog(
+          symbolClean,
+          `${side}_FILLED`,
+          `Live automated market order executed for ${finalQty} share(s) of ${symbolClean}.`,
+          "SUCCESS"
+        );
+
+        const newOrderObj: Order = {
+          id: dataOrder.id || Math.random().toString(),
+          symbol: symbolClean,
+          side: side,
+          qty: finalQty,
+          price: dataOrder.filled_avg_price ? parseFloat(dataOrder.filled_avg_price) : (dataOrder.price || 0),
+          status: dataOrder.status?.toUpperCase() || "ACCEPTED",
+          submittedAt: new Date().toLocaleTimeString(),
+        };
+        setOrders((prev) => [newOrderObj, ...prev]);
+
+        setTimeout(() => {
+          if (curRef.handleRefreshData) {
+            curRef.handleRefreshData();
+          }
+        }, 1200);
+
+      } catch (err: any) {
+        console.error(err);
+        addAutopilotLog(`Automated Live Order REJECTED: ${err.message || "Broker block"}`, "warn");
+        addLog(symbolClean, `AUTO_${side}_FAILED`, err.message || "Broker side rejections.", "CRITICAL");
+      }
+    } else {
+      // Offline Simulated execution
+      let estPrice = 150.0;
+      const matchedTicker = curRef.mockPositions.find((p: Position) => p.symbol === symbolClean);
+      if (matchedTicker) {
+        estPrice = matchedTicker.current_price;
+      } else {
+        if (symbolClean === "AAPL") estPrice = 182.2;
+        else if (symbolClean === "TSLA") estPrice = 195.0;
+        else if (symbolClean === "NVDA") estPrice = 115.5;
+        else if (symbolClean === "BTCUSD") estPrice = 67200.0;
+        else if (symbolClean === "MSFT") estPrice = 425.0;
+      }
+
+      const orderCost = estPrice * qtyNum;
+
+      if (side === "BUY") {
+        if (orderCost > curRef.simCash) {
+          addAutopilotLog(`Blocked automated simulation: Insufficient sim balance. Needs $${orderCost.toFixed(2)}.`, "warn");
+          addLog(symbolClean, "AUTO_BUY_SIM_FAILED", "Simulated cash reserves exhausted in automated loop.", "WARNING");
+          return;
+        }
+        setSimCash((c) => c - orderCost);
+        setMockPositions((prev) => {
+          const exists = prev.find((p) => p.symbol === symbolClean);
+          if (exists) {
+            const updatedQty = exists.qty + qtyNum;
+            if (Math.abs(updatedQty) < 0.0001) {
+              return prev.filter((p) => p.symbol !== symbolClean);
+            }
+            let newAvgEntry = exists.avg_entry_price;
+            let unrealized = 0;
+            if (exists.qty > 0) {
+              newAvgEntry = (exists.avg_entry_price * exists.qty + estPrice * qtyNum) / updatedQty;
+              unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
+            } else {
+              if (updatedQty < 0) {
+                newAvgEntry = exists.avg_entry_price;
+                unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
+              } else {
+                newAvgEntry = estPrice;
+                unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
+              }
+            }
+            return prev.map((p) =>
+              p.symbol === symbolClean
+                ? {
+                    ...p,
+                    qty: parseFloat(updatedQty.toFixed(4)),
+                    market_value: parseFloat((updatedQty * exists.current_price).toFixed(2)),
+                    avg_entry_price: parseFloat(newAvgEntry.toFixed(4)),
+                    unrealized_pl: parseFloat(unrealized.toFixed(2)),
+                  }
+                : p
+            );
+          } else {
+            return [
+              ...prev,
+              {
+                symbol: symbolClean,
+                qty: qtyNum,
+                avg_entry_price: estPrice,
+                current_price: estPrice,
+                market_value: parseFloat(orderCost.toFixed(2)),
+                unrealized_pl: 0,
+                unrealized_plpc: 0,
+                maintenance_margin_rate: 0.30,
+              },
+            ];
+          }
+        });
+        addAutopilotLog(`Sim purchase complete: Acquired ${qtyNum} shares of ${symbolClean} at $${estPrice.toFixed(2)}.`, "success");
+        addLog(symbolClean, "AUTO_BUY_SIM", `Purchased simulated ${qtyNum} shares of ${symbolClean} at cash basis $${estPrice.toFixed(2)}`, "SUCCESS");
+      } else {
+        // Simulated SELL (With support for Short Selling / Cover)
+        setSimCash((c) => c + orderCost);
+        setMockPositions((prev) => {
+          const exists = prev.find((p) => p.symbol === symbolClean);
+          if (exists) {
+            const updatedQty = exists.qty - qtyNum;
+            if (Math.abs(updatedQty) < 0.0001) {
+              return prev.filter((p) => p.symbol !== symbolClean);
+            }
+            let newAvgEntry = exists.avg_entry_price;
+            let unrealized = 0;
+            if (exists.qty > 0) {
+              if (updatedQty > 0) {
+                newAvgEntry = exists.avg_entry_price;
+                unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
+              } else {
+                newAvgEntry = estPrice;
+                unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
+              }
+            } else {
+              newAvgEntry = (exists.avg_entry_price * Math.abs(exists.qty) + estPrice * qtyNum) / Math.abs(updatedQty);
+              unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
+            }
+            return prev.map((p) =>
+              p.symbol === symbolClean
+                ? {
+                    ...p,
+                    qty: parseFloat(updatedQty.toFixed(4)),
+                    market_value: parseFloat((updatedQty * exists.current_price).toFixed(2)),
+                    avg_entry_price: parseFloat(newAvgEntry.toFixed(4)),
+                    unrealized_pl: parseFloat(unrealized.toFixed(2)),
+                  }
+                : p
+            );
+          } else {
+            const updatedQty = -qtyNum;
+            return [
+              ...prev,
+              {
+                symbol: symbolClean,
+                qty: parseFloat(updatedQty.toFixed(4)),
+                avg_entry_price: estPrice,
+                current_price: estPrice,
+                market_value: parseFloat((updatedQty * estPrice).toFixed(2)),
+                unrealized_pl: 0,
+                unrealized_plpc: 0,
+                maintenance_margin_rate: 0.30,
+              },
+            ];
+          }
+        });
+        addAutopilotLog(`Sim sale complete: Sold/Short-sold ${qtyNum} shares of ${symbolClean} at $${estPrice.toFixed(2)}.`, "success");
+        addLog(symbolClean, "AUTO_SELL_SIM", `Sold simulated ${qtyNum} shares of ${symbolClean} at cash basis $${estPrice.toFixed(2)}`, "SUCCESS");
+      }
+
+      setOrders((prev) => [
+        {
+          id: `sim-auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+          symbol: symbolClean,
+          side: side,
+          qty: qtyNum,
+          price: estPrice,
+          status: "FILLED_MOCK_AUTO",
+          submittedAt: new Date().toLocaleTimeString(),
+        },
+        ...prev,
+      ]);
+    }
+  }, []);
+
+  const executeAutopilotScan = useCallback(async () => {
+    const curRef = stateRef.current;
+    if (curRef.isAutopilotRunning) return;
+    setIsAutopilotRunning(true);
+    addAutopilotLog(`Executing Autopilot scan (${curRef.useAlpacaLive ? "Live-Alpaca Client" : "Simulator Model"})...`, "info");
+
+    try {
+      const currentActivePositions: Position[] = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
+      const currentActiveCash = curRef.useAlpacaLive ? parseFloat(curRef.alpacaAccount?.cash || 0) : curRef.simCash;
+      
+      const currentMktValue = currentActivePositions.reduce((sum, pos) => sum + pos.current_price * pos.qty, 0);
+      const currentTotalEquity = currentActiveCash + currentMktValue;
+      const currentGrossExposure = currentActivePositions.reduce((sum, pos) => sum + pos.current_price * Math.abs(pos.qty), 0);
+      const currentLeverageValue = currentTotalEquity > 0 ? currentGrossExposure / currentTotalEquity : 0;
+      const currentMaintMargin = currentActivePositions.reduce((sum, pos) => sum + (pos.current_price * Math.abs(pos.qty) * pos.maintenance_margin_rate), 0);
+      const currentCapacity = currentTotalEquity > 0 ? (currentMaintMargin / currentTotalEquity) * 100 : 0;
+
+      const targetSymbol = (curRef.autopilotTargetTicker || "AAPL").toUpperCase().trim() || "AAPL";
+
+      if (curRef.autopilotStrategy === "SENTRY_HEAL") {
+        addAutopilotLog(`Checking Margin Levels... Usage: ${currentCapacity.toFixed(1)}% | Ceiling Limit: ${curRef.warnThreshold}%.`, "info");
+        
+        if (currentCapacity >= curRef.warnThreshold) {
+          addAutopilotLog(`⚠️ Hazard: Over-allocation! Margin ${currentCapacity.toFixed(1)}% exceeds alert threshold. Triggering AutoDeleverage defender...`, "warn");
+          
+          if (currentActivePositions.length === 0) {
+            addAutopilotLog(`Nothing to sell to deleverage. Holdings are empty.`, "warn");
+          } else {
+            const highestExposure = [...currentActivePositions].sort((a, b) => {
+              const aCost = a.current_price * Math.abs(a.qty) * a.maintenance_margin_rate;
+              const bCost = b.current_price * Math.abs(b.qty) * b.maintenance_margin_rate;
+              return bCost - aCost;
+            })[0];
+            
+            const qtyAbs = Math.abs(highestExposure.qty);
+            const rawQty = Math.max(1, Math.round(qtyAbs * 0.2) || 1);
+            
+            if (highestExposure.qty > 0) {
+              addAutopilotLog(`Triggered auto-deleveraging order to sell ${rawQty} of high-beta long asset ${highestExposure.symbol}.`, "warn");
+              await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
+            } else {
+              addAutopilotLog(`Triggered auto-deleveraging order to cover ${rawQty} of high-beta short asset ${highestExposure.symbol}.`, "warn");
+              await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
+            }
+          }
+        } else {
+          addAutopilotLog(`Usage status is healthy. Autopilot deleveraging idle.`, "success");
+        }
+      }
+
+      else if (curRef.autopilotStrategy === "SCALPER") {
+        addAutopilotLog(`Triggering Micro-Scalper engine on target ticker: ${targetSymbol}...`, "info");
+        
+        const matched = currentActivePositions.find((p) => p.symbol === targetSymbol);
+        let currentSpotPrice = 150.0;
+        if (matched) {
+          currentSpotPrice = matched.current_price;
+        } else {
+          if (targetSymbol === "AAPL") currentSpotPrice = 182.2;
+          else if (targetSymbol === "TSLA") currentSpotPrice = 195.0;
+          else if (targetSymbol === "NVDA") currentSpotPrice = 115.5;
+          else if (targetSymbol === "BTCUSD") currentSpotPrice = 67200.0;
+          else if (targetSymbol === "MSFT") currentSpotPrice = 425.0;
+        }
+
+        const randSeed = Math.random();
+        if (randSeed > 0.55) {
+          const buyQty = targetSymbol === "BTCUSD" ? 0.02 : 5;
+          addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) is dipping below support. Buying units.`, "trade");
+          await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
+        } else if (randSeed < 0.25) {
+          const exists = currentActivePositions.find((p) => p.symbol === targetSymbol);
+          if (exists && exists.qty >= (targetSymbol === "BTCUSD" ? 0.02 : 2)) {
+            const sellQty = targetSymbol === "BTCUSD" ? 0.02 : Math.min(exists.qty, 5);
+            addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) hit local resistance spike. Profit harvesting.`, "trade");
+            await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
+          } else {
+            addAutopilotLog(`Scalper Signals: Selling sign emitted but zero inventory of ticker ${targetSymbol} exists.`, "info");
+          }
+        } else {
+          addAutopilotLog(`Scalper Range status: Neutral oscillation. No position change.`, "success");
+        }
+      }
+
+      else if (curRef.autopilotStrategy === "GEMINI_AI") {
+        addAutopilotLog(`Querying Gemini AI Strategist model on ${targetSymbol}...`, "info");
+        
+        const response = await fetch("/api/gemini/autopilot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            positions: currentActivePositions,
+            cash: currentActiveCash,
+            equity: currentTotalEquity,
+            leverage: currentLeverageValue.toFixed(2),
+            targetSymbol: targetSymbol,
+            marginCapacityUsed: currentCapacity,
+            warnThreshold: curRef.warnThreshold
+          }),
+        });
+
+        const resText = await response.text();
+        let data: any = null;
+        try {
+          data = JSON.parse(resText);
+        } catch (e) {
+          throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+        }
+
+        if (!response.ok || data?.error) {
+          throw new Error(data?.error || "API call failed.");
+        }
+        
+        if (data.action === "BUY") {
+          addAutopilotLog(`🤖 AI Decision: BUY recommended for ${targetSymbol}. Reason: "${data.reason}"`, "trade");
+          const buyQty = targetSymbol === "BTCUSD" ? 0.02 : data.qty || 5;
+          await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
+        } else if (data.action === "SELL") {
+          addAutopilotLog(`🤖 AI Decision: SELL recommended for ${targetSymbol}. Reason: "${data.reason}"`, "trade");
+          const sellQty = targetSymbol === "BTCUSD" ? 0.02 : data.qty || 5;
+          const exists = currentActivePositions.find((p) => p.symbol === targetSymbol);
+          if (!exists) {
+            addAutopilotLog(`🤖 AI Posture: Initiating new short exposure of ${sellQty} ${targetSymbol}.`, "trade");
+          }
+          await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
+        } else {
+          addAutopilotLog(`🤖 AI Decision: HOLD recommended for ${targetSymbol}. Reason: "${data.reason}"`, "success");
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
+      addAutopilotLog(`Scan tick interrupted: ${err.message || err}`, "warn");
+    } finally {
+      setIsAutopilotRunning(false);
+    }
+  }, [executeAutopilotOrder]);
+
+  // Autopilot loop trigger
+  useEffect(() => {
+    let intervalId: NodeJS.Timeout | null = null;
+    if (isAutopilotActive) {
+      addAutopilotLog(`🔴 Sentry Autopilot trading system ACTIVATED!`, "info");
+      executeAutopilotScan();
+      
+      intervalId = setInterval(() => {
+        executeAutopilotScan();
+      }, autopilotInterval * 1000);
+    } else {
+      addAutopilotLog(`🟢 Sentry Autopilot trading system DEACTIVATED. Intercept loops idle.`, "info");
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [isAutopilotActive, autopilotInterval, executeAutopilotScan]);
+
+  // Natural Simulator Market Drift Tick Engine
+  useEffect(() => {
+    let tickInterval: NodeJS.Timeout | null = null;
+    if (!useAlpacaLive && isTickStreamActive) {
+      tickInterval = setInterval(() => {
+        setMockPositions((prev) =>
+          prev.map((p) => {
+            const driftRange = p.symbol === "BTCUSD" ? 0.015 : 0.01;
+            const driftIndex = Math.random() * (driftRange * 2) - driftRange; // randomized drift percentages
+            const multiplier = 1 + driftIndex;
+            const newPrice = Math.max(0.01, p.current_price * multiplier);
+            const value = p.qty * newPrice;
+            const costBasis = p.qty * p.avg_entry_price;
+            const unrealized_pl = value - costBasis;
+            const unrealized_plpc = costBasis > 0 ? unrealized_pl / costBasis : 0;
+            return {
+              ...p,
+              current_price: parseFloat(newPrice.toFixed(2)),
+              market_value: parseFloat(value.toFixed(2)),
+              unrealized_pl: parseFloat(unrealized_pl.toFixed(2)),
+              unrealized_plpc: parseFloat(unrealized_plpc.toFixed(4)),
+            };
+          })
+        );
+      }, 5000);
+    }
+    return () => {
+      if (tickInterval) clearInterval(tickInterval);
+    };
+  }, [useAlpacaLive, isTickStreamActive]);
+  // --- END SENTRY AUTOPILOT ENGINE ---
+
+  // Setup persistence on Mount
+  useEffect(() => {
+    const savedApiKey = localStorage.getItem("APCA_API_KEY") || "";
+    const savedApiSecret = localStorage.getItem("APCA_API_SECRET") || "";
+    const savedIsPaper = localStorage.getItem("APCA_IS_PAPER") !== "false";
+    const savedUseAlpaca = localStorage.getItem("APCA_USE_ALPACA") === "true";
+
+    if (savedApiKey) setApiKey(savedApiKey);
+    if (savedApiSecret) setApiSecret(savedApiSecret);
+    setIsPaper(savedIsPaper);
+
+    const ts = new Date().toLocaleTimeString();
+
+    const initApp = async () => {
+      if (savedUseAlpaca && savedApiKey && savedApiSecret) {
+        setLogs([
+          {
+            id: "1",
+            timestamp: ts,
+            symbol: "SYSTEM",
+            action: "BOOT",
+            message: "Interactive Margin Risk analyzer system active.",
+            status: "INFO"
+          },
+          {
+            id: "2",
+            timestamp: ts,
+            symbol: "ALPACA",
+            action: "AUTO_CONNECT",
+            message: `Auto-connecting using stored keys to Alpaca ${savedIsPaper ? "Paper" : "Live"}...`,
+            status: "INFO"
+          }
+        ]);
+
+        setIsConnecting(true);
+        try {
+          const response = await fetch("/api/alpaca", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apiKey: savedApiKey, apiSecret: savedApiSecret, isPaper: savedIsPaper }),
+          });
+
+          const resText = await response.text();
+          let rawData: any = null;
+          try {
+            rawData = JSON.parse(resText);
+          } catch (e) {
+            throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+          }
+
+          if (!response.ok || rawData?.error) {
+            throw new Error(rawData?.error || "Failed stored key validation.");
+          }
+          setAlpacaAccount(rawData.account);
+          setAlpacaPositions(rawData.positions);
+          setIsConnected(true);
+          setUseAlpacaLive(true);
+
+          setLogs((prev) => [
+            {
+              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+              timestamp: new Date().toLocaleTimeString(),
+              symbol: "ALPACA",
+              action: "CONNECT_SUCCESS",
+              message: `Securely auto-connected! Account: ${rawData.account.account_number}. Cash: $${parseFloat(rawData.account.cash).toLocaleString()}`,
+              status: "SUCCESS"
+            },
+            ...prev
+          ]);
+        } catch (err: any) {
+          console.error("Auto-connect failed:", err);
+          setIsConnected(false);
+          setUseAlpacaLive(false);
+          setLogs((prev) => [
+            {
+              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+              timestamp: new Date().toLocaleTimeString(),
+              symbol: "ALPACA",
+              action: "AUTO_CONNECT_FAIL",
+              message: `Auto-connect failed: ${err.message || "Broker credentials mismatch"}. Falling back to Simulator.`,
+              status: "WARNING"
+            },
+            ...prev
+          ]);
+        } finally {
+          setIsConnecting(false);
+        }
+      } else {
+        setUseAlpacaLive(false);
+        setLogs([
+          {
+            id: "1",
+            timestamp: ts,
+            symbol: "SYSTEM",
+            action: "BOOT",
+            message: "Interactive Margin Risk analyzer system active.",
+            status: "INFO"
+          },
+          {
+            id: "2",
+            timestamp: ts,
+            symbol: "SYSTEM",
+            action: "INITIALIZE",
+            message: "Dashboard initialized in Local Simulator mode.",
+            status: "INFO"
+          }
+        ]);
+      }
+    };
+
+    initApp();
+  }, []);
+
+  // Helper log function
+  function addLog(
+    symbol: string,
+    action: string,
+    message: string,
+    status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO"
+  ) {
+    const newLog: Log = {
+      id: Math.random().toString(),
       timestamp: new Date().toLocaleTimeString(),
       symbol,
       action,
-      passed,
-      details,
+      message,
+      status,
     };
-    setRiskCheckLog((prev) => [newItem, ...prev].slice(0, 100));
-  };
+    setLogs((prev) => [newLog, ...prev].slice(0, 50));
+  }
 
-  // RECALCULATE GLOBAL portfolio metrics (reactive helper)
-  const recalculateMetrics = (currentPositions: Position[]) => {
-    let totalPValue = 0;
-    let totalMM = 0;
-    let totalPL = 0;
-
-    currentPositions.forEach((pos) => {
-      totalPValue += pos.market_value;
-      totalMM += pos.market_value * pos.maintenance_margin_rate;
-      totalPL += pos.unrealized_pl;
-    });
-
-    const currentCash = cashRef.current;
-    const currentRealizedPnl = totalRealizedPnlRef.current;
-    const freshEquity = currentCash + totalPValue;
-    setEquity(freshEquity);
-    setMaintenanceMargin(totalMM);
-    setInitialMargin(totalMM * 1.25);
-    setDayTradingBP(Math.max(0, 4 * (freshEquity - totalMM * 0.8)));
-    setRegTBP(Math.max(0, 2 * freshEquity));
-
-    const nowStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-
-    // Update Sentry cushion flow
-    setHistory((prev) => {
-      const nextHist = [...prev, {
-        time: nowStr,
-        equity: freshEquity,
-        maintenanceMargin: totalMM,
-        cushion: freshEquity - totalMM
-      }];
-      if (nextHist.length > 20) {
-        nextHist.shift();
-      }
-      return nextHist;
-    });
-
-    // Update P&L history
-    setDailyPnlHistory((prev) => {
-      const nextHist = [...prev, {
-        time: nowStr,
-        realizedPnl: currentRealizedPnl,
-        unrealizedPnl: totalPL,
-        equity: freshEquity,
-        maxDrawdown: Math.max(0, ((startOfDayEquity - freshEquity) / startOfDayEquity) * 100),
-      }];
-      if (nextHist.length > 20) {
-        nextHist.shift();
-      }
-      return nextHist;
-    });
-
-    setLastRefreshed(new Date().toLocaleTimeString());
-  };
-
-  // Math SMA computer helper
-  const getSMAs = (prices: number[]) => {
-    if (prices.length < 50) return { sma20: 0, sma50: 0, sma20Prev: 0 };
-    const last20 = prices.slice(-20);
-    const sma20 = last20.reduce((sum, p) => sum + p, 0) / 20;
-
-    const prev20 = prices.slice(-21, -1);
-    const sma20Prev = prev20.reduce((sum, p) => sum + p, 0) / 20;
-
-    const last50 = prices.slice(-50);
-    const sma50 = last50.reduce((sum, p) => sum + p, 0) / 50;
-
-    return { sma20, sma50, sma20Prev };
-  };
-
-  // CORE HEARTBEAT ENGINE EFFECT REFS (to prevent interval stutters on hooks mutation!)
-  const engineStateRef = useRef({
-    tickerPrices,
-    priceHistories,
-    positions,
-    autoTradingActive,
-    autoTradingStatus,
-    watchlist,
-    maxCapitalPerTradePct,
-    stopLossPct,
-    takeProfitPct,
-    maxOpenPositions,
-    strategyEnabled,
-    selectedStrategy,
-    maxDailyLossPct,
-    maxLeverage,
-    maxPositionSizePct,
-    cash,
-    equity,
-    maintenanceMargin,
-    orders,
-    recentFills,
-    totalRealizedPnl,
-  });
-
-  useEffect(() => {
-    engineStateRef.current = {
-      tickerPrices,
-      priceHistories,
-      positions,
-      autoTradingActive,
-      autoTradingStatus,
-      watchlist,
-      maxCapitalPerTradePct,
-      stopLossPct,
-      takeProfitPct,
-      maxOpenPositions,
-      strategyEnabled,
-      selectedStrategy,
-      maxDailyLossPct,
-      maxLeverage,
-      maxPositionSizePct,
-      cash,
-      equity,
-      maintenanceMargin,
-      orders,
-      recentFills,
-      totalRealizedPnl,
-    };
-  });
-
-  // Ticks standard random fluctuation / live polling every 5 seconds
-  useEffect(() => {
-    const interval = setInterval(() => {
-      // Defer execution references to the thread ref to prevent react stale hooks
-      const state = engineStateRef.current;
-
-      const nextPrices = { ...state.tickerPrices };
-      const nextHistories = { ...state.priceHistories };
-
-      // Fluctuate watchlist
-      Object.keys(nextPrices).forEach((sym) => {
-        const curPrice = nextPrices[sym];
-        const wave = Math.sin(Date.now() / 30000) * 0.12; // Natural trend vector
-        const changePct = (Math.random() - 0.49) * 0.007 + wave * 0.003;
-        let nextPrice = curPrice * (1 + changePct);
-        if (nextPrice <= 0) nextPrice = 1.0;
-        nextPrice = Number(nextPrice.toFixed(2));
-
-        nextPrices[sym] = nextPrice;
-
-        const historyArr = [...(nextHistories[sym] || [])];
-        historyArr.push(nextPrice);
-        if (historyArr.length > 60) {
-          historyArr.shift();
-        }
-        nextHistories[sym] = historyArr;
-      });
-
-      setTickerPrices(nextPrices);
-      setPriceHistories(nextHistories);
-
-      // Reconcile position market valuations based on fresh prices ticks
-      let updatedPositions = state.positions.map((pos) => {
-        const currentSymbolPrice = nextPrices[pos.symbol];
-        if (currentSymbolPrice !== undefined) {
-          const newMarketValue = pos.qty * currentSymbolPrice;
-          const purchaseCost = pos.qty * pos.avg_entry_price;
-          const freshPL = pos.side === "long"
-            ? (newMarketValue - purchaseCost)
-            : (purchaseCost - newMarketValue);
-          return {
-            ...pos,
-            current_price: currentSymbolPrice,
-            market_value: newMarketValue,
-            unrealized_pl: freshPL,
-            unrealized_plpc: purchaseCost > 0 ? (freshPL / purchaseCost) : 0,
-          };
-        }
-        return pos;
-      });
-
-      // Run automated strategy if RUNNING
-      if (state.autoTradingActive && state.autoTradingStatus === "RUNNING") {
-        const nextOrders = [...state.orders];
-        const nextRecentFills = [...state.recentFills];
-        let nextCash = state.cash;
-        let realizedDelta = 0;
-
-        state.watchlist.forEach((sym) => {
-          const posIdx = updatedPositions.findIndex((p) => p.symbol === sym);
-          const hasPos = posIdx > -1;
-          const prices = nextHistories[sym] || [];
-          const { sma20, sma50, sma20Prev } = getSMAs(prices);
-          const currentPrice = nextPrices[sym];
-          const prevPrice = prices[prices.length - 2] || currentPrice;
-
-          if (hasPos) {
-            // Check liquidations triggers
-            const position = updatedPositions[posIdx];
-            const slHit = currentPrice <= position.avg_entry_price * (1 - state.stopLossPct / 100);
-            const tpHit = currentPrice >= position.avg_entry_price * (1 + state.takeProfitPct / 100);
-            const crossUnder = currentPrice < sma20;
-
-            if (slHit || tpHit || crossUnder) {
-              const reason = slHit
-                ? "Stop-Loss Limit Reached"
-                : tpHit
-                ? "Take-Profit Limit Reached"
-                : "SMA(20) Crossover Exit Strategy";
-
-              const proceeds = position.market_value;
-              const realization = position.unrealized_pl;
-
-              nextCash += proceeds;
-              realizedDelta += realization;
-
-              nextOrders.unshift({
-                id: `ord-auto-${Date.now()}-${sym}`,
-                symbol: sym,
-                side: "SELL",
-                qty: position.qty,
-                price: currentPrice,
-                status: "FILLED",
-                submittedAt: new Date().toLocaleTimeString(),
-                strategyTag: state.selectedStrategy,
-                type: "MARKET",
-              });
-
-              nextRecentFills.unshift({
-                id: `fill-auto-${Date.now()}-${sym}`,
-                symbol: sym,
-                side: "SELL",
-                qty: position.qty,
-                price: currentPrice,
-                pnlImpact: realization,
-                filledAt: new Date().toLocaleTimeString(),
-              });
-
-              // Apply Removal
-              updatedPositions = updatedPositions.filter((p) => p.symbol !== sym);
-
-              addRiskLog(
-                sym,
-                "ORDER_EXECUTED_SELL",
-                true,
-                `Auto-exit condition met [${reason}]. Realized: $${realization.toFixed(2)}`
-              );
-            }
-          } else {
-            // Check crossover buying momentum triggers
-            const crossAbove = prevPrice <= sma20Prev && currentPrice > sma20 && sma20 > sma50;
-            if (crossAbove && updatedPositions.length < state.maxOpenPositions && state.strategyEnabled) {
-              // Allocate capital math
-              const proposedCapital = (state.maxCapitalPerTradePct * state.equity) / 100;
-              const capLimit = Math.min(proposedCapital, nextCash);
-              const qtyToBuy = Math.floor(capLimit / currentPrice);
-
-              if (qtyToBuy > 0) {
-                const cost = qtyToBuy * currentPrice;
-
-                // Live safety checks
-                const currentDrawdownVal = Math.max(0, startOfDayEquity - state.equity);
-                const dailyLossLimitPassed = currentDrawdownVal < (startOfDayEquity * state.maxDailyLossPct / 100);
-                const projectedMM = state.maintenanceMargin + (cost * 0.3); // Est. 30% MM rate
-                const leverageCheckPassed = (projectedMM / state.equity) <= state.maxLeverage;
-                const positionSizeCheckPassed = cost <= (state.maxPositionSizePct * state.equity / 100);
-
-                if (!dailyLossLimitPassed) {
-                  addRiskLog(sym, "AUTO_BUY_REJECT", false, "Halted: Peak loss circuit breaker breached! Autotrading suspended.");
-                  setAutoTradingStatus("HALTED");
-                  return;
-                }
-
-                if (!leverageCheckPassed) {
-                  addRiskLog(sym, "AUTO_BUY_REJECT", false, `Rejected: Multiplier risk exceeds safe leverage cap limit (${state.maxLeverage}x)`);
-                  return;
-                }
-
-                if (!positionSizeCheckPassed) {
-                  addRiskLog(sym, "AUTO_BUY_REJECT", false, `Rejected: Proposed cost exceeds maximum position limit constraint (${state.maxPositionSizePct}%)`);
-                  return;
-                }
-
-                // Execute trade acquisition
-                nextCash -= cost;
-
-                nextOrders.unshift({
-                  id: `ord-auto-${Date.now()}-${sym}`,
-                  symbol: sym,
-                  side: "BUY",
-                  qty: qtyToBuy,
-                  price: currentPrice,
-                  status: "FILLED",
-                  submittedAt: new Date().toLocaleTimeString(),
-                  strategyTag: state.selectedStrategy,
-                  type: "MARKET",
-                });
-
-                nextRecentFills.unshift({
-                  id: `fill-auto-${Date.now()}-${sym}`,
-                  symbol: sym,
-                  side: "BUY",
-                  qty: qtyToBuy,
-                  price: currentPrice,
-                  pnlImpact: 0,
-                  filledAt: new Date().toLocaleTimeString(),
-                });
-
-                // Compute volatility standard MM coefficients
-                let rate = 0.25;
-                if (["NVDA", "TSLA"].includes(sym)) rate = 0.40;
-                else if (sym === "BTC/USD") rate = 0.50;
-
-                updatedPositions.push({
-                  symbol: sym,
-                  qty: qtyToBuy,
-                  avg_entry_price: currentPrice,
-                  current_price: currentPrice,
-                  market_value: cost,
-                  unrealized_pl: 0,
-                  unrealized_plpc: 0,
-                  side: "long",
-                  maintenance_margin_rate: rate,
-                  realized_pnl: 0,
-                });
-
-                addRiskLog(
-                  sym,
-                  "ORDER_EXECUTED_BUY",
-                  true,
-                  `Momentum Crossover triggers BUY. Acquired ${qtyToBuy} Shares at $${currentPrice.toFixed(2)}.`
-                );
-              }
-            }
-          }
-        });
-
-        if (realizedDelta !== 0) {
-          setTotalRealizedPnl((prev) => prev + realizedDelta);
-        }
-        setOrders(nextOrders);
-        setRecentFills(nextRecentFills);
-        setCash(nextCash);
-      }
-
-      setPositions(updatedPositions);
-      recalculateMetrics(updatedPositions);
-
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  // Handle live data fetch
-  const fetchLiveData = async () => {
+  // Connect & fetch from Alpaca
+  const handleConnectAlpaca = async () => {
     if (!apiKey || !apiSecret) {
-      setErrorText("API credentials are not configured. Enter details under the integration key module.");
+      addLog("ALPACA", "CONNECT_ERROR", "Key or Secret cannot be blank.", "WARNING");
       return;
     }
-    setIsRefreshing(true);
-    setErrorText(null);
+
+    setIsConnecting(true);
+    addLog("ALPACA", "CONNECT_ATTEMPT", `Attempting connection to Alpaca ${isPaper ? "Paper" : "Live"} API...`, "INFO");
 
     try {
       const response = await fetch("/api/alpaca", {
@@ -768,1686 +850,1632 @@ export default function Page() {
         body: JSON.stringify({ apiKey, apiSecret, isPaper }),
       });
 
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error || "Failed to communicate with Alpaca API endpoint.");
+      const resText = await response.text();
+      let rawData: any = null;
+      try {
+        rawData = JSON.parse(resText);
+      } catch (e) {
+        throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
       }
 
-      const data = await response.json();
-      const account = data.account;
-      const originalPositions = data.positions;
+      if (!response.ok || rawData?.error) {
+        throw new Error(rawData?.error || "Failed key validation.");
+      }
+      setAlpacaAccount(rawData.account);
+      setAlpacaPositions(rawData.positions);
+      setIsConnected(true);
+      setUseAlpacaLive(true);
 
-      const mappedPositions: Position[] = originalPositions.map((pos: any) => {
-        const symbol = pos.symbol;
-        let rate = 0.25;
-        if (["NVDA", "TSLA", "COIN", "BTC/USD"].includes(symbol)) {
-          rate = 0.40;
-        } else if (pos.asset_class === "crypto") {
-          rate = 0.50;
+      // Persist values
+      localStorage.setItem("APCA_API_KEY", apiKey);
+      localStorage.setItem("APCA_API_SECRET", apiSecret);
+      localStorage.setItem("APCA_IS_PAPER", String(isPaper));
+      localStorage.setItem("APCA_USE_ALPACA", "true");
+
+      addLog(
+        "ALPACA",
+        "CONNECT_SUCCESS",
+        `Securely connected! Account: ${rawData.account.account_number}. Cash: $${parseFloat(rawData.account.cash).toLocaleString()}`,
+        "SUCCESS"
+      );
+    } catch (err: any) {
+      console.error(err);
+      setIsConnected(false);
+      setUseAlpacaLive(false);
+      localStorage.setItem("APCA_USE_ALPACA", "false");
+      addLog("ALPACA", "CONNECT_FAILED", err.message || "Broker authentication failed. Reverted to Simulator.", "CRITICAL");
+      alert(`Alpaca Error: ${err.message || "Unable to authorize. Please double check credentials."}`);
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const handleDisconnectAlpaca = () => {
+    setIsConnected(false);
+    setUseAlpacaLive(false);
+    setAlpacaPositions([]);
+    setAlpacaAccount(null);
+    localStorage.setItem("APCA_USE_ALPACA", "false");
+    addLog("ALPACA", "DISCONNECT", "Switched back to Local Risk Simulator mode.", "INFO");
+  };
+
+  // Calculations for current active mode
+  const activePositions = useAlpacaLive ? alpacaPositions : mockPositions;
+  const activeCash = useAlpacaLive
+    ? parseFloat(alpacaAccount?.cash || 0)
+    : simCash;
+
+  // Portfolio aggregates
+  const totalMarketValue = activePositions.reduce(
+    (sum, pos) => sum + pos.current_price * pos.qty,
+    0
+  );
+
+  const totalEquity = activeCash + totalMarketValue;
+  const grossExposure = activePositions.reduce(
+    (sum, pos) => sum + pos.current_price * Math.abs(pos.qty),
+    0
+  );
+  const currentLeverage = totalEquity > 0 ? grossExposure / totalEquity : 0;
+
+  // Maintenance Margin Required (MMR)
+  // Standard minimum margin is calculated as: each asset's Market value * asset's MMR rate
+  const totalMaintMarginRequired = activePositions.reduce(
+    (sum, pos) => sum + (pos.current_price * Math.abs(pos.qty) * pos.maintenance_margin_rate),
+    0
+  );
+
+  // Margin capacity usage
+  const marginCapacityUsed = totalEquity > 0 ? (totalMaintMarginRequired / totalEquity) * 100 : 0;
+  const excessLiquidity = totalEquity - totalMaintMarginRequired;
+
+  // Determine state alerts
+  let marginRiskStatus: "SAFE" | "WARNING" | "CRITICAL" | "MARGIN_CALL" = "SAFE";
+  if (marginCapacityUsed >= 100) {
+    marginRiskStatus = "MARGIN_CALL";
+  } else if (marginCapacityUsed >= criticalThreshold) {
+    marginRiskStatus = "CRITICAL";
+  } else if (marginCapacityUsed >= warnThreshold) {
+    marginRiskStatus = "WARNING";
+  }
+
+  // Handle Order Placement
+  const handleSubmitOrder = async (side: "BUY" | "SELL") => {
+    // Explicitly cast the input quantity as a floating-point number
+    const qtyNum = parseFloat(orderQty);
+    const symbolClean = orderSymbol.toUpperCase().trim();
+
+    if (!symbolClean) {
+      setOrderError("Please clarify a target trading symbol.");
+      return;
+    }
+    if (isNaN(qtyNum) || qtyNum <= 0) {
+      setOrderError("Enter a valid fractional or integer Quantity.");
+      return;
+    }
+
+    setOrderError("");
+    setOrderSuccess("");
+    setIsPlacingOrder(true);
+
+    if (useAlpacaLive) {
+      if (!isConnected) {
+        setIsPlacingOrder(false);
+        setOrderError("Broker connection is inactive. Switch back to Local Simulator or configure valid API credentials.");
+        addLog(symbolClean, `${side}_FAILED`, "Blocked transmission: keys are not authorized/connected.", "WARNING");
+        return;
+      }
+      addLog("ALPACA", side, `Transmitting Order: ${side} ${qtyNum} shares of ${symbolClean}`, "INFO");
+      try {
+        const response = await fetch("/api/alpaca/trade", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            apiKey,
+            apiSecret,
+            isPaper,
+            symbol: symbolClean,
+            qty: parseFloat(qtyNum.toFixed(6)), // Exposing fractional units with high-precision decimal floating point
+            side: side.toLowerCase(),
+          }),
+        });
+
+        const resText = await response.text();
+        let dataOrder: any = null;
+        try {
+          dataOrder = JSON.parse(resText);
+        } catch (e) {
+          throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
         }
 
-        return {
-          symbol,
-          qty: Math.abs(Number(pos.qty)),
-          avg_entry_price: Number(pos.avg_entry_price),
-          current_price: Number(pos.current_price),
-          market_value: Number(pos.market_value),
-          unrealized_pl: Number(pos.unrealized_pl),
-          unrealized_plpc: Number(pos.unrealized_plpc),
-          side: pos.side as "long" | "short",
-          maintenance_margin_rate: rate,
-          realized_pnl: 0,
-        };
-      });
+        if (!response.ok || dataOrder?.error) {
+          throw new Error(dataOrder?.error || "Order rejected by brokerage server.");
+        }
+        setOrderSuccess(`Successfully queued! Order ID: ${dataOrder.id || "Submitted"}.`);
+        addLog(
+          symbolClean,
+          `${side}_FILLED`,
+          `Live market order executed for ${qtyNum} share(s) of ${symbolClean}.`,
+          "SUCCESS"
+        );
 
-      setPositions(mappedPositions);
-      setEquity(Number(account.equity));
-      setCash(Number(account.cash));
-      setMaintenanceMargin(Number(account.maintenance_margin));
-      setInitialMargin(Number(account.initial_margin));
-      setDayTradingBP(Number(account.daytrading_buying_power));
-      setRegTBP(Number(account.regt_buying_power));
-      setMultiplier(account.multiplier);
-      setIsPdt(account.pattern_day_trader);
-      setPdtCount(account.daytrade_count);
-      setIsConnected(true);
-      setLastRefreshed(new Date().toLocaleTimeString());
-      addRiskLog("ALPACA", "METRICS_FETCHED", true, "Retrieved live account parameters, boundaries, and active positions.");
-    } catch (err: any) {
-      console.error(err);
-      setErrorText(err.message || "An unexpected error occurred. Verify credentials validity.");
-      setIsConnected(false);
-    } finally {
-      setIsRefreshing(false);
-    }
-  };
-
-  // Poll Alpaca in real mode
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (mode === "real" && isConnected) {
-      timer = setInterval(() => {
-        fetchLiveData();
-      }, 7000);
-    }
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, isConnected, apiKey, apiSecret, isPaper]);
-
-  // Auto-connect once on mount if saved credentials are loaded
-  const autoConnectedRef = useRef(false);
-  useEffect(() => {
-    if (apiKey && apiSecret && !isConnected && !autoConnectedRef.current) {
-      autoConnectedRef.current = true;
-      const initialTimer = setTimeout(() => {
-        fetchLiveData();
-      }, 500);
-      return () => clearTimeout(initialTimer);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey, apiSecret, isConnected]);
-
-  // Command control buttons
-  const handleToggleAutoTrading = () => {
-    if (autoTradingStatus === "HALTED") {
-      alert("Halted! Engine is locked under safety circuit protection. Resolve risks parameters or clear manually.");
-      return;
-    }
-    const nextState = !autoTradingActive;
-    setAutoTradingActive(nextState);
-    setAutoTradingStatus(nextState ? "RUNNING" : "PAUSED");
-    addRiskLog("SYS", nextState ? "ENGINE_START" : "ENGINE_PAUSED", true, nextState ? "Automated system enforcemer active. Watchlist monitored." : "Algorithmic loop paused.");
-  };
-
-  const handleKillSwitch = () => {
-    setAutoTradingActive(false);
-    setAutoTradingStatus("HALTED");
-
-    // Cancel all mock orders and close open holdings
-    if (positions.length > 0) {
-      let liquidationSalesTotal = 0;
-      let realizedLoses = 0;
-      const nextRecent = [...recentFills];
-      const nextOrders = [...orders];
-
-      positions.forEach((pos) => {
-        liquidationSalesTotal += pos.market_value;
-        realizedLoses += pos.unrealized_pl;
-
-        nextOrders.unshift({
-          id: `kill-${Date.now()}-${pos.symbol}`,
-          symbol: pos.symbol,
-          side: "SELL",
-          qty: pos.qty,
-          price: pos.current_price,
-          status: "FILLED",
+        // Add to historical orders list
+        const newOrderObj: Order = {
+          id: dataOrder.id || Math.random().toString(),
+          symbol: symbolClean,
+          side: side,
+          qty: qtyNum,
+          price: dataOrder.filled_avg_price ? parseFloat(dataOrder.filled_avg_price) : (dataOrder.price || 0),
+          status: dataOrder.status?.toUpperCase() || "ACCEPTED",
           submittedAt: new Date().toLocaleTimeString(),
-          strategyTag: "KILL_SWITCH",
-          type: "MARKET",
-        });
+        };
+        setOrders((prev) => [newOrderObj, ...prev]);
 
-        nextRecent.unshift({
-          id: `kill-fill-${Date.now()}-${pos.symbol}`,
-          symbol: pos.symbol,
-          side: "SELL",
-          qty: pos.qty,
-          price: pos.current_price,
-          pnlImpact: pos.unrealized_pl,
-          filledAt: new Date().toLocaleTimeString(),
-        });
-      });
+        // Refresh live stats after brief timeout for Alpaca side execution
+        setTimeout(() => {
+          handleRefreshData();
+        }, 1200);
 
-      setCash((c) => c + liquidationSalesTotal);
-      setTotalRealizedPnl((prev) => prev + realizedLoses);
-      setOrders(nextOrders);
-      setRecentFills(nextRecent);
-      setPositions([]);
-      setTimeout(() => recalculateMetrics([]), 50);
-    }
-
-    addRiskLog("SYS", "EMERGENCY_KILL", false, "KILL SWITCH DEPLOYED: Closed out all positions, cancelled orders and locked the engine.");
-  };
-
-  const [isPlacingOrder, setIsPlacingOrder] = useState(false);
-
-  const handlePlaceRealOrder = async (
-    symbol: string,
-    qty: number,
-    side: "long" | "short"
-  ) => {
-    if (!apiKey || !apiSecret) {
-      alert("Alpaca credentials are not configured. Enter details under the integration key module.");
-      return;
-    }
-    setIsPlacingOrder(true);
-    try {
-      const response = await fetch("/api/alpaca/trade", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiKey,
-          apiSecret,
-          isPaper,
-          symbol: symbol.toUpperCase(),
-          qty,
-          side: side === "long" ? "buy" : "sell",
-        }),
-      });
-
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error || "Alpaca rejected order execution.");
+      } catch (err: any) {
+        console.error(err);
+        setOrderError(err.message || "Failed order validation.");
+        addLog(symbolClean, `${side}_REJECTED`, err.message || "Execution failed.", "CRITICAL");
+      } finally {
+        setIsPlacingOrder(false);
+      }
+    } else {
+      // Offline simulation execute immediately
+      // Estimate simple price fallback
+      let estPrice = 150.0;
+      const matchedTicker = mockPositions.find((p) => p.symbol === symbolClean);
+      if (matchedTicker) {
+        estPrice = matchedTicker.current_price;
+      } else {
+        // Mock fallback prices for common tickers
+        if (symbolClean === "AAPL") estPrice = 182.2;
+        else if (symbolClean === "TSLA") estPrice = 195.0;
+        else if (symbolClean === "NVDA") estPrice = 115.5;
+        else if (symbolClean === "BTCUSD") estPrice = 67200.0;
+        else if (symbolClean === "MSFT") estPrice = 425.0;
       }
 
-      const orderData = await response.json();
-      addRiskLog(
-        symbol.toUpperCase(),
-        `REAL_TRADE_${side === "long" ? "BUY" : "SELL"}_SUCCESS`,
-        true,
-        `Executed real trade for ${qty} shares: Order ID ${orderData.id}, Status: ${orderData.status || "Accepted"}.`
-      );
-      
-      const orderId = orderData.id || `real-${Date.now()}-${symbol}`;
-      setOrders((o) => [
-        {
-          id: orderId,
-          symbol: symbol.toUpperCase(),
-          side: side === "long" ? "BUY" : "SELL",
-          qty,
-          price: orderData.filled_avg_price ? Number(orderData.filled_avg_price) : 0,
-          status: orderData.status?.toUpperCase() || "FILLED",
-          submittedAt: new Date().toLocaleTimeString(),
-          strategyTag: "MANUAL_TERMINAL",
-          type: "MARKET",
-        },
-        ...o,
-      ]);
+      const orderCost = estPrice * qtyNum;
 
-      alert(`Trade placed successfully on Alpaca! Order ID: ${orderData.id}`);
-      await fetchLiveData();
-    } catch (err: any) {
-      console.error(err);
-      addRiskLog(
-        symbol.toUpperCase(),
-        "REAL_TRADE_FAILED",
-        false,
-        err.message || "An unexpected error occurred during execution."
-      );
-      alert(`Failed to place live trade: ${err.message || "Unknown error"}`);
-    } finally {
+      if (side === "BUY" && orderCost > simCash) {
+        setIsPlacingOrder(false);
+        setOrderError(`Simulation block: Insufficient simulated cache. Needs $${orderCost.toFixed(2)}.`);
+        addLog(symbolClean, "BUY_SIM_FAILED", "Buying power exceeded in offline mock.", "WARNING");
+        return;
+      }
+
+      // Execute mock transaction calculation
       setIsPlacingOrder(false);
+      if (side === "BUY") {
+        setSimCash((c) => c - orderCost);
+        setMockPositions((prev) => {
+          const exists = prev.find((p) => p.symbol === symbolClean);
+          if (exists) {
+            const updatedQty = exists.qty + qtyNum;
+            if (Math.abs(updatedQty) < 0.0001) {
+              return prev.filter((p) => p.symbol !== symbolClean);
+            }
+            let newAvgEntry = exists.avg_entry_price;
+            let unrealized = 0;
+            if (exists.qty > 0) {
+              newAvgEntry = (exists.avg_entry_price * exists.qty + estPrice * qtyNum) / updatedQty;
+              unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
+            } else {
+              if (updatedQty < 0) {
+                newAvgEntry = exists.avg_entry_price;
+                unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
+              } else {
+                newAvgEntry = estPrice;
+                unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
+              }
+            }
+            return prev.map((p) =>
+              p.symbol === symbolClean
+                ? {
+                    ...p,
+                    qty: parseFloat(updatedQty.toFixed(4)),
+                    market_value: parseFloat((updatedQty * exists.current_price).toFixed(2)),
+                    avg_entry_price: parseFloat(newAvgEntry.toFixed(4)),
+                    unrealized_pl: parseFloat(unrealized.toFixed(2)),
+                  }
+                : p
+            );
+          } else {
+            return [
+              ...prev,
+              {
+                symbol: symbolClean,
+                qty: qtyNum,
+                avg_entry_price: estPrice,
+                current_price: estPrice,
+                market_value: parseFloat(orderCost.toFixed(2)),
+                unrealized_pl: 0,
+                unrealized_plpc: 0,
+                maintenance_margin_rate: parseFloat(newMaint) / 100 || 0.30,
+              },
+            ];
+          }
+        });
+        setOrderSuccess(`Simulated purchase complete: Acquired ${qtyNum} shares of ${symbolClean} at $${estPrice.toFixed(2)}.`);
+        addLog(symbolClean, "BUY_SIM", `Purchased simulated ${qtyNum} shares at $${estPrice}`, "SUCCESS");
+      } else {
+        // Simulated SELL / SHORT SELL
+        setSimCash((c) => c + orderCost);
+        setMockPositions((prev) => {
+          const exists = prev.find((p) => p.symbol === symbolClean);
+          if (exists) {
+            const updatedQty = exists.qty - qtyNum;
+            if (Math.abs(updatedQty) < 0.0001) {
+              return prev.filter((p) => p.symbol !== symbolClean);
+            }
+            let newAvgEntry = exists.avg_entry_price;
+            let unrealized = 0;
+            if (exists.qty > 0) {
+              if (updatedQty > 0) {
+                newAvgEntry = exists.avg_entry_price;
+                unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
+              } else {
+                newAvgEntry = estPrice;
+                unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
+              }
+            } else {
+              newAvgEntry = (exists.avg_entry_price * Math.abs(exists.qty) + estPrice * qtyNum) / Math.abs(updatedQty);
+              unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
+            }
+            return prev.map((p) =>
+              p.symbol === symbolClean
+                ? {
+                    ...p,
+                    qty: parseFloat(updatedQty.toFixed(4)),
+                    market_value: parseFloat((updatedQty * exists.current_price).toFixed(2)),
+                    avg_entry_price: parseFloat(newAvgEntry.toFixed(4)),
+                    unrealized_pl: parseFloat(unrealized.toFixed(2)),
+                  }
+                : p
+            );
+          } else {
+            const updatedQty = -qtyNum;
+            return [
+              ...prev,
+              {
+                symbol: symbolClean,
+                qty: parseFloat(updatedQty.toFixed(4)),
+                avg_entry_price: estPrice,
+                current_price: estPrice,
+                market_value: parseFloat((updatedQty * estPrice).toFixed(2)),
+                unrealized_pl: 0,
+                unrealized_plpc: 0,
+                maintenance_margin_rate: parseFloat(newMaint) / 100 || 0.30,
+              },
+            ];
+          }
+        });
+        setOrderSuccess(`Simulated sale complete: Liquidated/Short-sold ${qtyNum} shares of ${symbolClean} at $${estPrice.toFixed(2)}.`);
+        addLog(symbolClean, "SELL_SIM", `Sold/Short-sold simulated ${qtyNum} shares at $${estPrice}`, "SUCCESS");
+      }
+
+      // Record offline order
+      setOrders((prev) => [
+        {
+          id: `sim-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+          symbol: symbolClean,
+          side: side,
+          qty: qtyNum,
+          price: estPrice,
+          status: "FILLED_MOCK",
+          submittedAt: new Date().toLocaleTimeString(),
+        },
+        ...prev,
+      ]);
     }
   };
 
-  const handlePlaceLiveOrder = async (
-    symbol: string,
-    qty: number,
-    side: "buy" | "sell"
-  ): Promise<{ error?: string; success?: boolean; data?: any }> => {
-    if (!apiKey || !apiSecret) {
-      return { error: "Alpaca credentials are not configured below." };
+  // Add Custom Simulated Position Form
+  const handleAddNewPosition = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanSym = newSymbol.toUpperCase().trim();
+    const qtyVal = parseFloat(newQty);
+    const priceVal = parseFloat(newPrice);
+    const maintRateVal = parseFloat(newMaint) / 100;
+
+    if (!cleanSym || isNaN(qtyVal) || isNaN(priceVal) || qtyVal <= 0 || priceVal <= 0) {
+      alert("Please enter a valid symbol, Quantity, and current price.");
+      return;
     }
+
+    const value = qtyVal * priceVal;
+    const newPos: Position = {
+      symbol: cleanSym,
+      qty: qtyVal,
+      avg_entry_price: priceVal,
+      current_price: priceVal,
+      market_value: value,
+      unrealized_pl: 0,
+      unrealized_plpc: 0,
+      maintenance_margin_rate: maintRateVal,
+    };
+
+    setMockPositions((prev) => {
+      const filtered = prev.filter((p) => p.symbol !== cleanSym);
+      return [...filtered, newPos];
+    });
+
+    addLog(cleanSym, "ADD_MOCK", `Added simulated asset ${cleanSym} with ${maintRateVal * 100}% maintenance limit.`, "SUCCESS");
+    setNewSymbol("");
+    setNewQty("");
+    setNewPrice("");
+  };
+
+  // Shock Tickers Price manually inside Simulator
+  const handleShockPrices = (multiplier: number, targetSymbol?: string) => {
+    if (useAlpacaLive) {
+      alert("Price multiplier actions are disabled during active Alpaca brokerage logs.");
+      return;
+    }
+
+    setMockPositions((prev) =>
+      prev.map((p) => {
+        if (!targetSymbol || p.symbol === targetSymbol) {
+          const newPrice = Math.max(0.01, p.current_price * multiplier);
+          const value = p.qty * newPrice;
+          const costBasis = p.qty * p.avg_entry_price;
+          const unrealized_pl = value - costBasis;
+          const unrealized_plpc = costBasis > 0 ? unrealized_pl / costBasis : 0;
+          return {
+            ...p,
+            current_price: parseFloat(newPrice.toFixed(2)),
+            market_value: parseFloat(value.toFixed(2)),
+            unrealized_pl: parseFloat(unrealized_pl.toFixed(2)),
+            unrealized_plpc: parseFloat(unrealized_plpc.toFixed(4)),
+          };
+        }
+        return p;
+      })
+    );
+
+    const percentText = multiplier > 1 ? `+${Math.round((multiplier - 1) * 100)}%` : `-${Math.round((1 - multiplier) * 100)}%`;
+    addLog(
+      targetSymbol || "ALL",
+      "PRICE_SHOCK",
+      `Violated price levels by ${percentText} for ${targetSymbol || "all holdings"}. Recalculating margin limits.`,
+      multiplier < 1 ? "WARNING" : "SUCCESS"
+    );
+  };
+
+  // Reset simulator to defaults
+  const handleResetSimulator = () => {
+    setSimCash(100000);
+    setMockPositions([
+      {
+        symbol: "NVDA",
+        qty: 150,
+        avg_entry_price: 110.0,
+        current_price: 115.5,
+        market_value: 17325.0,
+        unrealized_pl: 825.0,
+        unrealized_plpc: 0.05,
+        maintenance_margin_rate: 0.35,
+      },
+      {
+        symbol: "AAPL",
+        qty: 200,
+        avg_entry_price: 180.0,
+        current_price: 182.2,
+        market_value: 36440.0,
+        unrealized_pl: 440.0,
+        unrealized_plpc: 0.012,
+        maintenance_margin_rate: 0.30,
+      },
+      {
+        symbol: "TSLA",
+        qty: 60,
+        avg_entry_price: 220.0,
+        current_price: 195.0,
+        market_value: 11700.0,
+        unrealized_pl: -1500.0,
+        unrealized_plpc: -0.1136,
+        maintenance_margin_rate: 0.40,
+      },
+      {
+        symbol: "BTCUSD",
+        qty: 0.5,
+        avg_entry_price: 65000.0,
+        current_price: 67200.0,
+        market_value: 33600.0,
+        unrealized_pl: 1100.0,
+        unrealized_plpc: 0.0338,
+        maintenance_margin_rate: 0.50,
+      }
+    ]);
+    addLog("SYSTEM", "RESET", "Reverted simulator settings to factory configuration ($100,000 cash).", "INFO");
+  };
+
+  // Delete Mock holding
+  const handleDeleteMockPosition = (symbol: string) => {
+    setMockPositions((prev) => prev.filter((p) => p.symbol !== symbol));
+    addLog(symbol, "REMOVE_MOCK", `Removed simulated stock ${symbol} from active risk matrix.`, "INFO");
+  };
+
+  // Python Code SDK Generation
+  const pyScriptCode = `import requests
+import json
+
+# Terminal Configuration Exports
+ALPACA_API_KEY = "${apiKey || "YOUR_API_KEY"}"
+ALPACA_API_SECRET = "${apiSecret || "YOUR_API_SECRET"}"
+ENDPOINT = "https://paper-api.alpaca.markets" if ${isPaper ? "True" : "False"} else "https://api.alpaca.markets"
+
+headers = {
+    "APCA-API-KEY-ID": ALPACA_API_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_API_SECRET,
+    "Content-Type": "application/json"
+}
+
+def analyze_portfolio_risk_sentry():
+    # 1. Fetch Account Parameters
+    acc_url = f"{ENDPOINT}/v2/account"
+    res = requests.get(acc_url, headers=headers)
+    if res.status_code != 200:
+        print("Authorization refused. Verify Alpaca key pairs.")
+        return
+        
+    account = res.json()
+    equity = float(account["equity"])
+    cash = float(account["cash"])
+    
+    # 2. Fetch Active Holdings
+    pos_url = f"{ENDPOINT}/v2/positions"
+    pos_res = requests.get(pos_url, headers=headers)
+    positions = pos_res.json()
+    
+    # Standard maintenance calculation configuration
+    total_mmr_burden = 0.0
+    print("\\n🛡️ --- RISK TERMINAL ACTIVE MATRIX --- 🛡️")
+    
+    for pos in positions:
+        sym = pos["symbol"]
+        qty = float(pos["qty"])
+        mkt_val = float(pos["market_value"])
+        # Standard maintenance margin fallback 
+        maint_rate = 0.30 
+        maint_cost = mkt_val * maint_rate
+        total_mmr_burden += maint_cost
+        print(f"Asset {sym} | Shares: {qty} | Value: \${mkt_val:,.2f} | Maint Cost: \${maint_cost:,.2f}")
+        
+    margin_utilization = (total_mmr_burden / equity) * 100 if equity > 0 else 0
+    
+    print(f"\\nPortfolio Equity: \${equity:,.2f}")
+    print(f"Cash Reserves: \${cash:,.2f}")
+    print(f"Current Margin Capacity Blocked: {margin_utilization:.2f}%")
+    
+    # Trigger Warnings match Sentry Threshold levels
+    if margin_utilization >= ${criticalThreshold}:
+        print("⚠️ [SENTRY_CRITICAL_ALERT] Margin capacity is compromised!")
+    elif margin_utilization >= ${warnThreshold}:
+        print("⚡ [SENTRY_WARNING] Asset leverages are expanding. Review active collaterals.")
+    else:
+        print("✅ Account status safe. Excess Margin verified.")
+
+if __name__ == "__main__":
+    analyze_portfolio_risk_sentry()`;
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    alert("Python Sentry integration script copied to clipboard!");
+  };
+
+  // Triggers Gemini Stress Diagnosis Analysis
+  const runAIPortfolioDiagnosis = async () => {
+    setIsAiLoading(true);
+    setAiAnalysis("");
+    addLog("GEMINI", "DIAGNOSE_REQUEST", "Starting AI margin downside shock diagnostics...", "INFO");
+
     try {
-      const response = await fetch("/api/alpaca/trade", {
+      const response = await fetch("/api/gemini/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          apiKey,
-          apiSecret,
-          isPaper,
-          symbol: symbol.toUpperCase(),
-          qty,
-          side,
+          positions: activePositions,
+          cash: activeCash,
+          equity: totalEquity,
+          buyingPower: activeCash * simLeverageLimit,
+          leverage: currentLeverage.toFixed(2),
         }),
       });
 
-      if (!response.ok) {
-        const errData = await response.json();
-        return { error: errData.error || "Alpaca rejected live order execution." };
+      const resText = await response.text();
+      let resultData: any = null;
+      try {
+        resultData = JSON.parse(resText);
+      } catch (e) {
+        throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
       }
 
-      const orderData = await response.json();
-      addRiskLog(
-        symbol.toUpperCase(),
-        `LIVE_ORDER_${side.toUpperCase()}_SUCCESS`,
-        true,
-        `Executed real order for ${qty} shares: Order id ${orderData.id}, Status: ${orderData.status || "Submitted"}.`
-      );
+      if (!response.ok || resultData?.error) {
+        throw new Error(resultData?.error || "Unable to contact AI engine.");
+      }
 
-      const orderId = orderData.id || `live-${Date.now()}-${symbol}`;
-      setOrders((o) => [
-        {
-          id: orderId,
-          symbol: symbol.toUpperCase(),
-          side: side === "buy" ? "BUY" : "SELL",
-          qty,
-          price: orderData.filled_avg_price ? Number(orderData.filled_avg_price) : 0,
-          status: orderData.status?.toUpperCase() || "ACCEPTED",
-          submittedAt: new Date().toLocaleTimeString(),
-          strategyTag: "MANUAL_TERMINAL",
-          type: "MARKET",
-        },
-        ...o,
-      ]);
-
-      // Soft trigger data refresh
-      setTimeout(() => {
-        fetchLiveData();
-      }, 1500);
-
-      return { success: true, data: orderData };
+      setAiAnalysis(resultData.diagnosis);
+      addLog("GEMINI", "DIAGNOSE_SUCCESS", "AI Stress diagnosis compiled successfully.", "SUCCESS");
     } catch (err: any) {
       console.error(err);
-      addRiskLog(
-        symbol.toUpperCase(),
-        "LIVE_ORDER_FAILED",
-        false,
-        err.message || "An unexpected error occurred during live order execution."
-      );
-      return { error: err.message || "An unexpected order transmission error occurred." };
+      setAiAnalysis("### 🔴 Diagnostic Failed\nUnable to retrieve portfolio diagnosis from AI server. Please make sure the backend is active.");
+      addLog("GEMINI", "DIAGNOSE_ERROR", err.message || "Model computation timed out.", "CRITICAL");
+    } finally {
+      setIsAiLoading(false);
     }
   };
-
-  // Mock Trade Trigger (Interactive Widget)
-  const handleAddMockPosition = (
-    symbol: string,
-    qty: number,
-    price: number,
-    side: "long" | "short",
-    mmRate: number
-  ) => {
-    if (mode === "real") {
-      handlePlaceRealOrder(symbol, qty, side);
-      return;
-    }
-    const cost = qty * price;
-    if (cash < cost && side === "long") {
-      alert("Insufficient buying power (cash buffer deficit) to place this simulated trade.");
-      return;
-    }
-
-    // Safety checks before mock placing
-    const sizeCheck = cost <= (maxPositionSizePct * equity / 100);
-    if (!sizeCheck) {
-      addRiskLog(symbol, "MANUAL_TRADE_REFUSED", false, `Order cost exceeds maximum allocation limit constraint (${maxPositionSizePct}%)`);
-      alert(`Manual trade rejected: Position value is ${((cost / equity) * 100).toFixed(1)}% of your equity. Limit is ${maxPositionSizePct}%.`);
-      return;
-    }
-
-    setPositions((prev) => {
-      const existingIdx = prev.findIndex((p) => p.symbol === symbol && p.side === side);
-      let updated = [...prev];
-
-      if (existingIdx > -1) {
-        const item = prev[existingIdx];
-        const newQty = item.qty + qty;
-        const newMarketValue = newQty * price;
-        const newPL = (price - item.avg_entry_price) * newQty * (side === "long" ? 1 : -1);
-
-        updated[existingIdx] = {
-          ...item,
-          qty: newQty,
-          current_price: price,
-          market_value: newMarketValue,
-          unrealized_pl: newPL,
-          unrealized_plpc: newPL / (item.avg_entry_price * newQty),
-        };
-      } else {
-        updated.push({
-          symbol,
-          qty,
-          avg_entry_price: price,
-          current_price: price,
-          market_value: cost,
-          unrealized_pl: 0,
-          unrealized_plpc: 0,
-          side,
-          maintenance_margin_rate: mmRate,
-          realized_pnl: 0,
-        });
-      }
-
-      if (side === "long") {
-        setCash((c) => c - cost);
-      } else {
-        setCash((c) => c + cost);
-      }
-
-      // Record Order Logs
-      const orderId = `man-${Date.now()}-${symbol}`;
-      setOrders((o) => [
-        {
-          id: orderId,
-          symbol,
-          side: side === "long" ? "BUY" : "SELL",
-          qty,
-          price,
-          status: "FILLED",
-          submittedAt: new Date().toLocaleTimeString(),
-          strategyTag: "MANUAL_TERMINAL",
-          type: "MARKET",
-        },
-        ...o,
-      ]);
-
-      setRecentFills((f) => [
-        {
-          id: `fill-man-${Date.now()}-${symbol}`,
-          symbol,
-          side: side === "long" ? "BUY" : "SELL",
-          qty,
-          price,
-          pnlImpact: 0,
-          filledAt: new Date().toLocaleTimeString(),
-        },
-        ...f,
-      ]);
-
-      addRiskLog(symbol, "MANUAL_BUY", true, `Acquired ${qty} shs manually at $${price.toFixed(2)}. Total value: $${cost.toFixed(2)}.`);
-      setTimeout(() => recalculateMetrics(updated), 50);
-      return updated;
-    });
-  };
-
-  const handleRemovePosition = (symbol: string) => {
-    const item = positions.find((p) => p.symbol === symbol);
-    if (!item) return;
-
-    setPositions((prev) => {
-      const filtered = prev.filter((p) => p.symbol !== symbol);
-      if (item.side === "long") {
-        setCash((c) => c + item.market_value);
-      } else {
-        setCash((c) => c - item.market_value);
-      }
-
-      setTotalRealizedPnl((prevPnl) => prevPnl + item.unrealized_pl);
-
-      setOrders((o) => [
-        {
-          id: `man-exit-${Date.now()}-${symbol}`,
-          symbol,
-          side: "SELL",
-          qty: item.qty,
-          price: item.current_price,
-          status: "FILLED",
-          submittedAt: new Date().toLocaleTimeString(),
-          strategyTag: "MANUAL_TERMINAL",
-          type: "MARKET",
-        },
-        ...o,
-      ]);
-
-      setRecentFills((f) => [
-        {
-          id: `fill-exit-${Date.now()}-${symbol}`,
-          symbol,
-          side: "SELL",
-          qty: item.qty,
-          price: item.current_price,
-          pnlImpact: item.unrealized_pl,
-          filledAt: new Date().toLocaleTimeString(),
-        },
-        ...f,
-      ]);
-
-      addRiskLog(symbol, "MANUAL_CLOSE", true, `Liquidated holdings of ${symbol}. Realized P&L: $${item.unrealized_pl.toFixed(2)}`);
-      setTimeout(() => recalculateMetrics(filtered), 50);
-      return filtered;
-    });
-  };
-
-  const handleSimulateMarketDrop = (pct: number) => {
-    setPositions((prev) => {
-      const crashed = prev.map((pos) => {
-        const crashFactor = pos.side === "long" ? (1 - pct) : (1 + pct);
-        const newPrice = pos.current_price * crashFactor;
-        const newMarketValue = pos.qty * newPrice;
-        const purchaseCost = pos.qty * pos.avg_entry_price;
-        const freshPL = pos.side === "long"
-          ? (newMarketValue - purchaseCost)
-          : (purchaseCost - newMarketValue);
-
-        return {
-          ...pos,
-          current_price: newPrice,
-          market_value: newMarketValue,
-          unrealized_pl: freshPL,
-          unrealized_plpc: purchaseCost > 0 ? (freshPL / purchaseCost) : 0,
-        };
-      });
-
-      addRiskLog("SYS", "CRASH_TRIGGERED", false, `Simulated external drop of ${(pct * 100).toFixed(0)}% across holdings.`);
-      setTimeout(() => recalculateMetrics(crashed), 50);
-      return crashed;
-    });
-  };
-
-  const handleResetSimulation = () => {
-    setCash(44775.0);
-    setTotalRealizedPnl(1250.0);
-    const defaults: Position[] = [
-      {
-        symbol: "AAPL",
-        qty: 150,
-        avg_entry_price: 172.5,
-        current_price: 175.0,
-        market_value: 26250,
-        unrealized_pl: 375,
-        unrealized_plpc: 0.0145,
-        side: "long",
-        maintenance_margin_rate: 0.25,
-        realized_pnl: 0,
-      },
-      {
-        symbol: "NVDA",
-        qty: 45,
-        avg_entry_price: 800.0,
-        current_price: 850.0,
-        market_value: 38250,
-        unrealized_pl: 2250,
-        unrealized_plpc: 0.0625,
-        side: "long",
-        maintenance_margin_rate: 0.40,
-        realized_pnl: 0,
-      },
-      {
-        symbol: "TSLA",
-        qty: 60,
-        avg_entry_price: 210.0,
-        current_price: 195.0,
-        market_value: 11700,
-        unrealized_pl: -900,
-        unrealized_plpc: -0.0714,
-        side: "long",
-        maintenance_margin_rate: 0.35,
-        realized_pnl: 0,
-      },
-    ];
-    setPositions(defaults);
-    setOrders([
-      {
-        id: "ord-initial-1",
-        symbol: "NVDA",
-        side: "BUY",
-        qty: 45,
-        price: 800.0,
-        status: "FILLED",
-        submittedAt: "09:32:15",
-        strategyTag: "MOMENTUM_TRADER_V4",
-        type: "MARKET",
-      },
-      {
-        id: "ord-initial-2",
-        symbol: "MSFT",
-        side: "SELL",
-        qty: 40,
-        price: 410.0,
-        status: "FILLED",
-        submittedAt: "10:14:50",
-        strategyTag: "MOMENTUM_TRADER_V4",
-        type: "MARKET",
-      }
-    ]);
-    setRecentFills([
-      {
-        id: "fill-initial-1",
-        symbol: "NVDA",
-        side: "BUY",
-        qty: 45,
-        price: 800.0,
-        pnlImpact: 0,
-        filledAt: "09:32:15",
-      },
-      {
-        id: "fill-initial-2",
-        symbol: "MSFT",
-        side: "SELL",
-        qty: 40,
-        price: 418.5,
-        pnlImpact: 340.0,
-        filledAt: "10:14:50",
-      }
-    ]);
-    addRiskLog("SYS", "SIMULATION_RESET", true, "Cleared transaction database and reset sandbox matrices to default state.");
-    setTimeout(() => recalculateMetrics(defaults), 50);
-  };
-
-  const handleLiquidateAll = () => {
-    if (positions.length === 0) {
-      alert("No active positions to liquidate.");
-      return;
-    }
-
-    let liquidationSalesTotal = 0;
-    let realizedPnlDelta = 0;
-    const nextRecent = [...recentFills];
-    const nextOrders = [...orders];
-
-    positions.forEach((pos) => {
-      liquidationSalesTotal += pos.market_value;
-      realizedPnlDelta += pos.unrealized_pl;
-
-      nextOrders.unshift({
-        id: `liq-${Date.now()}-${pos.symbol}`,
-        symbol: pos.symbol,
-        side: pos.side === "long" ? "SELL" : "BUY",
-        qty: pos.qty,
-        price: pos.current_price,
-        status: "FILLED",
-        submittedAt: new Date().toLocaleTimeString(),
-        strategyTag: "MANUAL_LIQUIDATE",
-        type: "MARKET",
-      });
-
-      nextRecent.unshift({
-        id: `liq-fill-${Date.now()}-${pos.symbol}`,
-        symbol: pos.symbol,
-        side: pos.side === "long" ? "SELL" : "BUY",
-        qty: pos.qty,
-        price: pos.current_price,
-        pnlImpact: pos.unrealized_pl,
-        filledAt: new Date().toLocaleTimeString(),
-      });
-    });
-
-    let nextCash = cash;
-    positions.forEach((pos) => {
-      if (pos.side === "long") {
-        nextCash += pos.market_value;
-      } else {
-        nextCash -= pos.market_value;
-      }
-    });
-
-    setCash(nextCash);
-    setTotalRealizedPnl((prev) => prev + realizedPnlDelta);
-    setOrders(nextOrders);
-    setRecentFills(nextRecent);
-    setPositions([]);
-    addRiskLog("SYS", "LIQUIDATE_ALL", true, "Initiated emergency manual liquidation of all asset holdings.");
-    setTimeout(() => recalculateMetrics([]), 50);
-  };
-
-  const handleResetPaperSettings = () => {
-    setCash(44775.0);
-    setTotalRealizedPnl(1250.0);
-    setWarningThreshold(25);
-    setCriticalThreshold(80);
-    setMaxCapitalPerTradePct(15);
-    setStopLossPct(3.0);
-    setTakeProfitPct(6.0);
-    setMaxOpenPositions(5);
-    setStrategyEnabled(true);
-    setAutoTradingActive(false);
-    setAutoTradingStatus("PAUSED");
-
-    const defaults: Position[] = [
-      {
-        symbol: "AAPL",
-        qty: 150,
-        avg_entry_price: 172.5,
-        current_price: 175.0,
-        market_value: 26250,
-        unrealized_pl: 375,
-        unrealized_plpc: 0.0145,
-        side: "long",
-        maintenance_margin_rate: 0.25,
-        realized_pnl: 0,
-      },
-      {
-        symbol: "NVDA",
-        qty: 45,
-        avg_entry_price: 800.0,
-        current_price: 850.0,
-        market_value: 38250,
-        unrealized_pl: 2250,
-        unrealized_plpc: 0.0625,
-        side: "long",
-        maintenance_margin_rate: 0.40,
-        realized_pnl: 0,
-      },
-      {
-        symbol: "TSLA",
-        qty: 60,
-        avg_entry_price: 210.0,
-        current_price: 195.0,
-        market_value: 11700,
-        unrealized_pl: -900,
-        unrealized_plpc: -0.0714,
-        side: "long",
-        maintenance_margin_rate: 0.35,
-        realized_pnl: 0,
-      },
-    ];
-    setPositions(defaults);
-    setOrders([
-      {
-        id: "ord-initial-1",
-        symbol: "NVDA",
-        side: "BUY",
-        qty: 45,
-        price: 800.0,
-        status: "FILLED",
-        submittedAt: "09:32:15",
-        strategyTag: "MOMENTUM_TRADER_V4",
-        type: "MARKET",
-      },
-      {
-        id: "ord-initial-2",
-        symbol: "MSFT",
-        side: "SELL",
-        qty: 40,
-        price: 410.0,
-        status: "FILLED",
-        submittedAt: "10:14:50",
-        strategyTag: "MOMENTUM_TRADER_V4",
-        type: "MARKET",
-      }
-    ]);
-    setRecentFills([
-      {
-        id: "fill-initial-1",
-        symbol: "NVDA",
-        side: "BUY",
-        qty: 45,
-        price: 800.0,
-        pnlImpact: 0,
-        filledAt: "09:32:15",
-      },
-      {
-        id: "fill-initial-2",
-        symbol: "MSFT",
-        side: "SELL",
-        qty: 40,
-        price: 418.5,
-        pnlImpact: 340.0,
-        filledAt: "10:14:50",
-      }
-    ]);
-
-    addRiskLog("SYS", "PAPER_SETTINGS_RESET", true, "All paper accounts, risk limits, and simulation variables have been reset to factory defaults.");
-    setTimeout(() => recalculateMetrics(defaults), 50);
-  };
-
-  const marginUtilizationRatio = equity > 0 ? (maintenanceMargin / equity) * 100 : 0;
-  const cushionAmount = equity - maintenanceMargin;
-  const cushionPct = equity > 0 ? (cushionAmount / equity) * 100 : 0;
-
-  // Track Floating margins alerts
-  useEffect(() => {
-    const timestamp = new Date().toLocaleTimeString();
-    const cooldownPeriod = 30 * 1000;
-
-    if (marginUtilizationRatio >= criticalThreshold) {
-      const now = Date.now();
-      if (!cooldownRef.current["critical"] || now - cooldownRef.current["critical"] > cooldownPeriod) {
-        const freshAlert: AlertLogItem = {
-          id: `crit-${now}`,
-          timestamp,
-          title: "🚨 CRITICAL LIQUIDATION PRE-EMPTIVE THREAT",
-          message: `Margin utilization is at high-danger level ${marginUtilizationRatio.toFixed(1)}%! Safety cushion remaining: $${cushionAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })} (${cushionPct.toFixed(1)}%). Consider closing positions immediately.`,
-          type: "critical",
-        };
-        setAlerts((prev) => [freshAlert, ...prev].slice(0, 50));
-        cooldownRef.current["critical"] = now;
-      }
-    } else if (marginUtilizationRatio >= warningThreshold) {
-      const now = Date.now();
-      if (!cooldownRef.current["warning"] || now - cooldownRef.current["warning"] > cooldownPeriod) {
-        const freshAlert: AlertLogItem = {
-          id: `warn-${now}`,
-          timestamp,
-          title: "⚠️ MARGIN UTILIZATION EXCEEDS SAFETY BOUNDS",
-          message: `Portfolio margin usage is at ${marginUtilizationRatio.toFixed(1)}% (Target safeguard limit: < ${warningThreshold}%). Safety cushion: $${cushionAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })} (${cushionPct.toFixed(1)}%).`,
-          type: "warning",
-        };
-        setAlerts((prev) => [freshAlert, ...prev].slice(0, 50));
-        cooldownRef.current["warning"] = now;
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [marginUtilizationRatio, warningThreshold, criticalThreshold, equity, maintenanceMargin]);
-
-  const handleDisconnect = () => {
-    setIsConnected(false);
-    setMode("mock");
-  };
-
-  // Capital calculations
-  const totalInvestedCapital = positions.reduce((sum, p) => sum + (p.qty * p.avg_entry_price), 0);
-  const totalUnrealizedPnl = positions.reduce((sum, p) => sum + p.unrealized_pl, 0);
-  const totalPnl = totalRealizedPnl + totalUnrealizedPnl;
-  const totalPnlPct = (totalPnl / startOfDayEquity) * 100;
-  const currentDrawdownVal = Math.max(0, startOfDayEquity - equity);
-  const currentDrawdownPct = startOfDayEquity > 0 ? (currentDrawdownVal / startOfDayEquity) * 100 : 0;
 
   return (
-    <div id="page-wrapper" className="min-h-screen bg-brand-bg font-sans text-gray-300 flex flex-col selection:bg-brand-green/30 selection:text-brand-green">
+    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 bg-brand-bg md:p-8" id="root-container">
       
-      {/* Upper WARNING Status banner if limits breached */}
-      {marginUtilizationRatio >= criticalThreshold && (
-        <div className="bg-brand-red/15 border-b border-brand-red/35 px-4 py-2 text-center text-brand-red text-xs font-semibold flex items-center justify-center gap-2 animate-pulse" id="global-danger-bar">
-          <AlertTriangle className="w-4 h-4 text-brand-red" />
-          <span>PORTFOLIO LIQUID RISK REACHED: Margin Utilization is currently {marginUtilizationRatio.toFixed(1)}%. Account safety cushion has fallen below critical boundaries!</span>
+      {/* Risk Alert Banner */}
+      {marginRiskStatus !== "SAFE" && (
+        <div
+          id="margin-warning-alert"
+          className={`mb-6 p-4 rounded-xl border flex items-start gap-4 animate-pulse ${
+            marginRiskStatus === "MARGIN_CALL"
+              ? "bg-red-950/40 border-brand-red text-brand-red"
+              : marginRiskStatus === "CRITICAL"
+              ? "bg-amber-950/40 border-amber-600 text-amber-500"
+              : "bg-yellow-950/30 border-yellow-500 text-yellow-400"
+          }`}
+        >
+          <ShieldAlert className="h-6 w-6 shrink-0 mt-0.5" id="alert-icon" />
+          <div className="flex-1" id="alert-content">
+            <h3 className="font-bold text-base md:text-lg tracking-wide uppercase">
+              {marginRiskStatus === "MARGIN_CALL"
+                ? "⚠️ SENTRY CRITICAL MARGIN CALL - LIQUIDATION THREAT"
+                : marginRiskStatus === "CRITICAL"
+                ? "⚡ LIQUIDATION LEVEL SENTRY REACHED (CRITICAL)"
+                : "⚡ MARGIN CAP CAPACITY WARNING"}
+            </h3>
+            <p className="text-sm opacity-90 mt-1 font-mono">
+              {marginRiskStatus === "MARGIN_CALL"
+                ? `Maintenance Required of $${totalMaintMarginRequired.toLocaleString()} exceeds overall Net Equity of $${totalEquity.toLocaleString()}! Scale back leverage, sell high-beta tickers or deposit collateral cash instantly to block automatic liqudiations.`
+                : `Margin allocation represents ${marginCapacityUsed.toFixed(1)}% of net account collateral. Warn thresholds exceeded (${criticalThreshold}% config limit). Run the Gemini Diagnostics down below to evaluate high beta exposures.`}
+            </p>
+          </div>
         </div>
       )}
 
-      {/* Header */}
-      <header className="border-b border-brand-border bg-brand-bg/85 backdrop-blur px-6 py-4 flex flex-col md:flex-row items-center justify-between gap-4 sticky top-0 z-40">
-        <div className="flex items-center gap-3">
-          <div className="w-3 h-3 rounded-full bg-brand-green shadow-[0_0_8px_#2ecc71] animate-pulse"></div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight text-white uppercase flex items-center gap-2">
-              Alpaca <span className="text-gray-500 font-light">Automated Trading Console</span>
-            </h1>
-            <p className="text-[11px] text-gray-500 mt-0.5 font-mono">FRAMEWORK: MOMENTUM SYSTEM ENGINE V4</p>
+      {/* Hero Header */}
+      <header className="mb-8 border-b border-brand-border pb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4" id="header-widget">
+        <div id="header-branding">
+          <div className="flex items-center gap-2.5 mb-1.5" id="app-logo-row">
+            <span className="p-1 px-2 rounded-md bg-brand-green/20 text-brand-green text-xs font-bold uppercase tracking-wider font-mono">
+              Broker System v4.1
+            </span>
+            <span className="p-1 px-2 rounded-md bg-brand-border text-brand-text/75 text-xs font-mono font-bold" id="mode-text">
+              {useAlpacaLive ? "SECURE PROXY" : "LOCAL SIMULATOR"}
+            </span>
           </div>
+          <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight text-white flex items-center gap-2" id="app-main-title">
+            Broker Risk Sentry Terminal
+          </h1>
+          <p className="text-sm text-gray-400 mt-1 max-w-xl" id="app-description">
+            Interactive visual margin stress computing. Connect real Alpaca brokerage portfolios to trigger automated liquidity thresholds or manually shock prices offline.
+          </p>
         </div>
 
-        {/* Credentials / Sandbox State buttons */}
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="flex bg-brand-card px-3 py-1.5 rounded-lg border border-brand-border text-xs text-[#ff9f43] font-bold font-mono uppercase tracking-wider items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#ff9f43] animate-ping" />
-            Alpaca Real Integration Active
-          </div>
+        {/* Global Action Tools */}
+        <div className="flex items-center gap-3 self-start md:self-center" id="global-controls">
+          <button
+            id="reset-simulation-button"
+            onClick={handleResetSimulator}
+            disabled={useAlpacaLive}
+            className="flex items-center gap-2 p-2.5 px-4 rounded-lg text-sm bg-brand-border hover:bg-brand-border/80 border border-brand-border hover:border-gray-500 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            title="Reset simulated balances to default configuration"
+          >
+            <RotateCcw className="h-4 w-4" />
+            <span>Reset Demo</span>
+          </button>
 
-          <div className="flex items-center gap-3">
+          <div className="flex bg-brand-card p-1 rounded-lg border border-brand-border" id="mode-switch-pill">
             <button
-              onClick={mode === "real" ? fetchLiveData : () => recalculateMetrics(positions)}
-              disabled={isRefreshing || (mode === "real" && (!apiKey || !apiSecret))}
-              className="p-2 bg-brand-card border border-brand-border hover:bg-brand-bg text-gray-400 hover:text-gray-200 disabled:opacity-40 rounded-lg transition cursor-pointer"
-              title="Manual Fetch Limits"
-              id="manual-refresh-btn"
+              id="switch-simulated-pill"
+              onClick={handleDisconnectAlpaca}
+              className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition ${
+                !useAlpacaLive
+                  ? "bg-brand-green/25 text-brand-green border border-brand-green/30"
+                  : "text-gray-405 text-gray-400 hover:text-white"
+              }`}
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin text-brand-green" : ""}`} />
+              Simulate Risk
             </button>
-
-            <div className="text-right text-[11px] font-mono">
-              <div className="text-gray-500 uppercase">SYS API STATUS</div>
-              <div className="flex items-center gap-1.5 mt-0.5 justify-end">
-                <div className={`w-2 h-2 rounded-full ${mode === "mock" ? "bg-brand-yellow shadow-[0_0_6px_#f1c40f]" : isConnected ? "bg-brand-green shadow-[0_0_6px_#2ecc71]" : "bg-brand-red animate-pulse shadow-[0_0_6px_#e74c3c]"}`} />
-                <span className={mode === "mock" ? "text-brand-yellow font-bold text-[10px]" : isConnected ? "text-brand-green font-bold text-[10px]" : "text-brand-red font-bold text-[10px]"}>
-                  {mode === "mock" ? "SIMULATED_SANDBOX" : isConnected ? "LIVE_ALPACA_TRADING" : "KEYS_DISCONNECTED"}
-                </span>
-              </div>
-            </div>
+            <button
+              id="switch-alpaca-pill"
+              onClick={() => {
+                if (apiKey && apiSecret) {
+                  handleConnectAlpaca();
+                } else {
+                  // Focus configuration inputs or alert
+                  alert("Please enter Alpaca API configuration keys down below first.");
+                  document.getElementById("alpaca-config-card")?.scrollIntoView({ behavior: "smooth" });
+                }
+              }}
+              className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition ${
+                useAlpacaLive
+                  ? "bg-brand-green/25 text-brand-green border border-brand-green/30"
+                  : "text-gray-405 text-gray-400 hover:text-white"
+              }`}
+            >
+              Live Alpaca
+            </button>
           </div>
         </div>
       </header>
 
-      {/* TOP COMPREHENSIVE KPI BAND STRIP */}
-      <section className="bg-[#0b0c10] border-b border-brand-border p-4 md:px-6">
-        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row items-stretch justify-between gap-6">
-          <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4">
-            
-            {/* Capital Deployed */}
-            <div className="bg-brand-card border border-brand-border rounded-lg p-3.5 text-left flex flex-col justify-between">
-              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest block mb-0.5">Capital Deployed</span>
-              <span className="text-sm font-bold font-mono text-white leading-tight">
-                ${totalInvestedCapital?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-              <span className="text-[9px] text-gray-500 mt-1 block">Active Cost Basis</span>
-            </div>
+      {/* Grid: Setup Configurations & Key Indicators */}
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8" id="grid-controls-and-stats">
+        
+        {/* Alpaca API Config Console */}
+        <div id="alpaca-config-card" className="lg:col-span-1 bg-brand-card rounded-xl p-5 border border-brand-border flex flex-col justify-between">
+          <div id="api-panel-header">
+            <h2 className="text-lg font-bold text-white flex items-center gap-2 mb-3 font-mono border-b border-brand-border pb-2.5">
+              <Sliders className="text-brand-green h-5 w-5" />
+              ALPACA CLIENT SETUP
+            </h2>
+            <p className="text-xs text-gray-400 mb-4" id="api-panel-hint">
+              Secure key transport. Credentials exist transiently on-the-fly and persist solely in private local client cookies.
+            </p>
 
-            {/* Cash Available */}
-            <div className="bg-brand-card border border-brand-border rounded-lg p-3.5 text-left flex flex-col justify-between">
-              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest block mb-0.5">Cash Available</span>
-              <span className="text-sm font-bold font-mono text-brand-green leading-tight">
-                ${cash?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-              <span className="text-[9px] text-gray-500 mt-1 block">Liquidity Reserve</span>
-            </div>
+            <div className="space-y-3" id="api-inputs-form">
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1 font-mono">
+                  Alpaca API Key ID
+                </label>
+                <input
+                  type="text"
+                  id="alpaca-api-key-input"
+                  placeholder="e.g. PKXXXXXXXXXXXXXXXXXX"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  className="w-full bg-brand-bg rounded-lg border border-brand-border p-2.5 text-sm text-white focus:outline-none focus:border-brand-green md:text-base font-mono"
+                />
+              </div>
 
-            {/* Net Liquidation Value */}
-            <div className="bg-brand-card border border-brand-border rounded-lg p-3.5 text-left flex flex-col justify-between ring-1 ring-brand-green/10">
-              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest block mb-0.5">Net Liquidation Value</span>
-              <span className="text-sm font-bold font-mono text-white leading-tight">
-                ${equity?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-              <span className="text-[9px] text-brand-green font-bold uppercase mt-1 flex items-center gap-0.5">
-                <Target className="w-2.5 h-2.5" /> Live Net Worth
-              </span>
-            </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1 font-mono">
+                  Alpaca Secret Key
+                </label>
+                <div className="relative" id="api-secret-container">
+                  <input
+                    type={showApiSecret ? "text" : "password"}
+                    id="alpaca-api-secret-input"
+                    placeholder="e.g. abcdefghijklmnopqrstuvwxyzXXXXXX"
+                    value={apiSecret}
+                    onChange={(e) => setApiSecret(e.target.value)}
+                    className="w-full bg-brand-bg rounded-lg border border-brand-border p-2.5 text-sm text-white focus:outline-none focus:border-brand-green pr-10 md:text-base font-mono"
+                  />
+                  <button
+                    type="button"
+                    id="toggle-secret-visibility"
+                    onClick={() => setShowApiSecret(!showApiSecret)}
+                    className="absolute inset-y-0 right-3 flex items-center text-gray-400 hover:text-white"
+                  >
+                    {showApiSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
 
-            {/* Realized P&L */}
-            <div className="bg-brand-card border border-brand-border rounded-lg p-3.5 text-left flex flex-col justify-between">
-              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest block mb-0.5">Realized P&L Today</span>
-              <span className={`text-sm font-bold font-mono leading-tight ${totalRealizedPnl >= 0 ? "text-brand-green" : "text-brand-red"}`}>
-                {totalRealizedPnl >= 0 ? "+" : ""}${totalRealizedPnl?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-              <span className="text-[9px] text-gray-500 mt-1 block">Completed Trades</span>
-            </div>
-
-            {/* Unrealized P&L */}
-            <div className="bg-brand-card border border-brand-border rounded-lg p-3.5 text-left flex flex-col justify-between">
-              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest block mb-0.5">Unrealized P&L</span>
-              <span className={`text-sm font-bold font-mono leading-tight ${totalUnrealizedPnl >= 0 ? "text-brand-green" : "text-brand-red"}`}>
-                {totalUnrealizedPnl >= 0 ? "+" : ""}${totalUnrealizedPnl?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-              <span className="text-[9px] text-gray-500 mt-1 block">Floating Positions</span>
-            </div>
-
-            {/* Total P&L Pct */}
-            <div className="bg-brand-card border border-brand-border rounded-lg p-3.5 text-left flex flex-col justify-between">
-              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest block mb-0.5">Total Performance %</span>
-              <span className={`text-sm font-bold font-mono leading-tight ${totalPnl >= 0 ? "text-brand-green" : "text-brand-red"}`}>
-                {totalPnl >= 0 ? "+" : ""}{totalPnlPct.toFixed(2)}%
-              </span>
-              <span className="text-[9px] text-gray-500 mt-1 block">Relative trading profit</span>
-            </div>
-
-          </div>
-
-          {/* ENGINE CONTROLS BOX MODULE */}
-          <div className="bg-[#121319] border border-brand-border rounded-lg p-3.5 flex flex-wrap sm:flex-nowrap items-center justify-between gap-5 shrink-0 xl:w-[410px]">
-            <div className="text-left">
-              <span className="text-[10.5px] font-semibold text-gray-500 uppercase tracking-wider block mb-1">AUTO-TRADING CONTROL</span>
-              <div className="flex items-center gap-2">
-                <span className={`w-2.5 h-2.5 rounded-full ${autoTradingStatus === "RUNNING" ? "bg-brand-green shadow-[0_0_8px_#2ecc71] animate-pulse" : autoTradingStatus === "PAUSED" ? "bg-brand-yellow animate-bounce" : "bg-brand-red"}`} />
-                <span className={`text-xs font-black font-mono tracking-wider ${autoTradingStatus === "RUNNING" ? "text-brand-green" : autoTradingStatus === "PAUSED" ? "text-brand-yellow" : "text-brand-red"}`}>
-                  ENGINE {autoTradingStatus}
-                </span>
+              <div id="alpaca-endpoint-toggles" className="flex items-center justify-between py-1 bg-brand-bg/50 px-2.5 rounded-lg border border-brand-border/60">
+                <span className="text-xs text-gray-400 font-medium">Remote API Endpoint</span>
+                <div className="flex gap-2" id="endpoints-group">
+                  <button
+                    id="paper-api-toggle"
+                    onClick={() => {
+                      setIsPaper(true);
+                      localStorage.setItem("APCA_IS_PAPER", "true");
+                    }}
+                    className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition ${
+                      isPaper
+                        ? "bg-brand-green/20 text-brand-green border border-brand-green/45"
+                        : "text-gray-400 hover:text-gray-200"
+                    }`}
+                  >
+                    Paper
+                  </button>
+                  <button
+                    id="live-api-toggle"
+                    onClick={() => {
+                      setIsPaper(false);
+                      localStorage.setItem("APCA_IS_PAPER", "false");
+                    }}
+                    className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition ${
+                      !isPaper
+                        ? "bg-brand-red/20 text-brand-red border border-brand-red/45"
+                        : "text-gray-400 hover:text-gray-200"
+                    }`}
+                  >
+                    Live Real
+                  </button>
+                </div>
               </div>
             </div>
+          </div>
 
-            <div className="flex items-center gap-2.5">
+          <div className="pt-4 border-t border-brand-border/50 mt-4" id="api-buttons-footer">
+            {isConnected && useAlpacaLive ? (
+              <div className="space-y-2" id="connected-actions">
+                <div className="flex items-center gap-2 justify-between bg-emerald-950/20 p-2 rounded-lg border border-emerald-950 text-brand-green text-xs font-mono">
+                  <div className="flex items-center gap-1.5">
+                    <CheckCircle className="h-4 w-4 shrink-0" />
+                    <span>ALIGNED ACTIVE</span>
+                  </div>
+                  <span>PROXY ENABLED</span>
+                </div>
+                <button
+                  id="disconnect-alpaca-button"
+                  onClick={handleDisconnectAlpaca}
+                  className="w-full bg-[#ff1744]/20 hover:bg-[#ff1744]/35 border border-[#ff1744]/40 text-brand-red text-sm font-semibold p-2.5 rounded-lg transition"
+                >
+                  Disconnect Live Connection
+                </button>
+              </div>
+            ) : (
               <button
-                onClick={handleToggleAutoTrading}
-                className={`px-4 py-2.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer border ${
-                  autoTradingActive
-                    ? "bg-brand-yellow/10 hover:bg-brand-yellow/20 text-brand-yellow border-brand-yellow/30"
-                    : "bg-brand-green text-black hover:bg-brand-green/95 font-black border-transparent"
-                }`}
+                id="connect-alpaca-button"
+                onClick={handleConnectAlpaca}
+                disabled={isConnecting}
+                className="w-full bg-brand-green hover:bg-brand-green/90 text-brand-bg md:text-sm text-xs font-bold uppercase tracking-wider p-3 rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-2 font-mono"
               >
-                {autoTradingActive ? (
+                {isConnecting ? (
                   <>
-                    <Pause className="w-3.5 h-3.5 fill-current" /> PAUSE AUTO
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>AUTHENTICATING CLIENT...</span>
                   </>
                 ) : (
                   <>
-                    <Play className="w-3.5 h-3.5 fill-current" /> AUTO-TRADE ON
+                    <Zap className="h-4 w-4" />
+                    <span>CONNECT ALPACA PORTFOLIO</span>
                   </>
                 )}
               </button>
+            )}
+          </div>
+        </div>
 
+        {/* Big Performance Portfolio Metrics */}
+        <div id="portfolio-performance-stats" className="lg:col-span-2 grid grid-cols-2 lg:grid-cols-3 gap-4 bg-brand-card/30 rounded-xl p-5 border border-brand-border/80">
+          
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-equity">
+            <DollarSign className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
+              Net Capital Equity
+            </span>
+            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="net-equity-number">
+              ${totalEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-xs text-brand-green mt-1.5 flex items-center gap-1 font-mono" id="stat-net-equity-pl">
+              <TrendingUp className="h-3 w-3 shrink-0" />
+              <span>Overall liquid collateral</span>
+            </div>
+          </div>
+
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-cash">
+            <Sliders className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
+              Ready Cash Balance
+            </span>
+            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="cash-balance-number">
+              ${activeCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-xs text-blue-400 mt-1.5 flex items-center gap-1 font-mono" id="stat-cash-status">
+              <span>Idle liquid funding reserves</span>
+            </div>
+          </div>
+
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden col-span-2 lg:col-span-1" id="stat-buying-power">
+            <Zap className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
+              Account Buying Power
+            </span>
+            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="buying-power-number">
+              ${(useAlpacaLive ? parseFloat(alpacaAccount?.buying_power || 0) : activeCash * simLeverageLimit).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-xs text-purple-400 mt-1.5 flex items-center gap-1 font-mono" id="stat-buying-power-limit">
+              <span>{useAlpacaLive ? "Active Alpaca quote" : `${simLeverageLimit}x mechanical ratio limit`}</span>
+            </div>
+          </div>
+
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-maint-burden">
+            <ShieldAlert className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
+              Maintenance Burden
+            </span>
+            <div className="text-xl sm:text-2xl font-bold text-white font-mono break-all" id="maint-burden-number">
+              ${totalMaintMarginRequired.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-xs text-yellow-500 mt-1.5 font-mono" id="stat-maint-burden-rate">
+              Based on individual asset ratings
+            </div>
+          </div>
+
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-excess-collateral">
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
+              Excess Collateral Surplus
+            </span>
+            <div className={`text-xl sm:text-2xl font-bold font-mono break-all ${excessLiquidity >= 0 ? "text-brand-green" : "text-brand-red animate-pulse"}`} id="excess-collateral-number">
+              ${excessLiquidity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-xs mt-1.5 font-mono" id="stat-excess-collateral-description">
+              {excessLiquidity >= 0 ? (
+                <span className="text-gray-400">Above margin call line</span>
+              ) : (
+                <span className="text-brand-red font-bold uppercase">Liquidation Underway</span>
+              )}
+            </div>
+          </div>
+
+          <div className="p-4 bg-brand-card rounded-xl border border-[#2c374d] relative overflow-hidden" id="stat-active-leverage">
+            <TrendingUp className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
+              Working Leverage Ratio
+            </span>
+            <div className="text-2xl sm:text-3xl font-black font-mono break-all text-white" id="active-leverage-number">
+              {currentLeverage.toFixed(2)}<span className="text-xs font-semibold text-gray-400 relative -top-1">x</span>
+            </div>
+            <div className="text-xs mt-1.5 font-mono" id="stat-working-leverage-bracket">
+              {currentLeverage > 3.0 ? (
+                <span className="text-brand-red uppercase font-bold text-[10px]">ULTRA LEVERAGED HIGHRISK</span>
+              ) : currentLeverage > 1.5 ? (
+                <span className="text-yellow-500 text-[10px] uppercase font-bold">Standard Margin Active</span>
+              ) : (
+                <span className="text-brand-green text-[10px] uppercase font-bold">Unleveraged / Cash Asset</span>
+              )}
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      {/* Row: Interactive Margin Stress Gauge & AI Stress Analysis Desk */}
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8" id="grid-stressometer-and-ai">
+        
+        {/* Margin Stressometer (Visual Dynamic Gauge) */}
+        <div id="col-stressometer-widget" className="bg-brand-card rounded-xl p-6 border border-brand-border flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between mb-4 border-b border-brand-border pb-3" id="stressometer-head">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2 font-mono">
+                <Sliders className="text-[#00e676] h-5 w-5" />
+                MARGIN POTENCY MATRIX
+              </h2>
+              <span className={`p-1 px-2.5 rounded text-[11px] font-bold font-mono tracking-wide ${
+                marginRiskStatus === "SAFE"
+                  ? "bg-brand-green/20 text-brand-green"
+                  : marginRiskStatus === "WARNING"
+                  ? "bg-yellow-500/20 text-yellow-400"
+                  : "bg-brand-red/20 text-brand-red uppercase animate-pulse"
+              }`} id="potency-status-badge">
+                PORTFOLIO {marginRiskStatus}
+              </span>
+            </div>
+
+            {/* Custom Sentry stressometer indicator */}
+            <div className="py-6 flex flex-col items-center justify-center relative" id="stress-guage-component">
+              
+              {/* Mechanical dial rendering with responsive circles */}
+              <div className="relative w-64 h-32 overflow-hidden flex items-end justify-center mb-4" id="circular-gauge-panel">
+                <div className="absolute top-0 left-0 right-0 bottom-0 rounded-t-full border-8 border-brand-border/60" />
+                
+                {/* Gauge colors zones overlays */}
+                <div className="absolute top-0 left-0 right-0 bottom-0 rounded-t-full border-8 border-transparent" 
+                     style={{
+                       background: "conic-gradient(from 180deg at 50% 100%, #00e676 0deg, #ffeb3b 90deg, #ff1744 140deg, #ff1744 180deg)",
+                       WebkitMask: "radial-gradient(ellipse at 50% 100%, transparent 62%, black 63%)",
+                       mask: "radial-gradient(ellipse at 50% 100%, transparent 62%, black 63%)"
+                     }}
+                />
+
+                {/* Needle Rotation */}
+                <div 
+                  className="absolute bottom-0 w-1 bg-white h-24 origin-bottom transition-transform duration-700 ease-out z-10" 
+                  style={{ 
+                    transform: `rotate(${Math.min(180, Math.max(0, (marginCapacityUsed / 100) * 180 - 90))}deg)`,
+                  }} 
+                />
+
+                <div className="absolute bottom-0 w-8 h-8 rounded-full bg-brand-bg border-4 border-brand-border z-20" />
+              </div>
+
+              {/* Text metadata values */}
+              <div className="text-center" id="gauge-readout-text">
+                <div className="text-4xl font-extrabold text-white font-mono" id="gauge-percentage">
+                  {marginCapacityUsed.toFixed(1)}%
+                </div>
+                <p className="text-xs text-gray-400 uppercase tracking-wider mt-1 font-semibold font-mono">
+                  Blocked Margin Allocation
+                </p>
+                <p className="text-[11px] text-gray-500 mt-1" id="maint-critical-limit-text">
+                  (Liquidation at 100%)
+                </p>
+              </div>
+
+              {/* Active Threshold Bars indicators */}
+              <div className="w-full mt-6 grid grid-cols-2 gap-4 border-t border-brand-border pt-4 text-xs font-mono" id="thresholds-configuration">
+                <div>
+                  <span className="text-gray-400 flex items-center justify-between mb-1.5">
+                    <span>Warn limit:</span>
+                    <span className="text-yellow-400">{warnThreshold}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    id="warning-threshold-slider"
+                    min="40"
+                    max="80"
+                    value={warnThreshold}
+                    onChange={(e) => setWarnThreshold(parseInt(e.target.value))}
+                    className="w-full accent-yellow-400 cursor-pointer"
+                  />
+                </div>
+                <div>
+                  <span className="text-gray-400 flex items-center justify-between mb-1.5">
+                    <span>Critical limit:</span>
+                    <span className="text-brand-red">{criticalThreshold}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    id="critical-threshold-slider"
+                    min="81"
+                    max="99"
+                    value={criticalThreshold}
+                    onChange={(e) => setCriticalThreshold(parseInt(e.target.value))}
+                    className="w-full accent-brand-red cursor-pointer"
+                  />
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <p className="text-xs text-gray-400 font-mono mt-4 leading-relaxed p-3 bg-brand-bg/55 rounded-lg border border-brand-border" id="potency-analysis-advice">
+            <span className="text-[#ff1744] font-bold">ℹ️ TRADING PROTOCOL:</span> Maintenance margin represents the immediate asset volume your brokerage blocks as hard security deposit. Reaching 100% capacity triggers auto-sell algorithms on the underlying assets without warning.
+          </p>
+        </div>
+
+        {/* AI Downside Shock Diagnostics Control Desk */}
+        <div id="col-ai-desk" className="bg-brand-card rounded-xl p-6 border border-brand-border flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between mb-4 border-b border-brand-border pb-3" id="ai-desk-head">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2 font-mono">
+                <Cpu className="text-brand-green h-5 w-5" />
+                GEMINI RISK MATRIX
+              </h2>
               <button
-                onClick={handleKillSwitch}
-                className="px-4 py-2.5 bg-brand-red text-white hover:bg-brand-red/90 text-xs font-black rounded-lg transition border border-transparent shadow-lg shadow-brand-red/10 cursor-pointer flex items-center gap-1.5"
+                id="trigger-ai-stress-test"
+                onClick={runAIPortfolioDiagnosis}
+                disabled={isAiLoading}
+                className="bg-brand-green text-brand-bg border border-brand-green hover:bg-brand-green/85 text-xs font-bold uppercase tracking-wider p-2 px-3.5 rounded-lg flex items-center gap-1.5 transition disabled:opacity-45"
               >
-                <Skull className="w-3.5 h-3.5" /> KILL SWITCH
+                {isAiLoading ? (
+                  <>
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    <span>DIAGNOSING...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>RUN AI DIAGNOSTICS</span>
+                  </>
+                )}
               </button>
             </div>
+
+            {/* AI Diagnostics Text Area Display */}
+            <div className="bg-brand-bg rounded-xl border border-brand-border p-4 h-[255px] overflow-y-auto" id="ai-result-display">
+              {aiAnalysis ? (
+                <div className="prose prose-invert prose-sm max-w-none text-xs text-gray-300 font-sans space-y-3 font-mono leading-relaxed" id="ai-output-formatted">
+                  {/* Basic markdown parsing blocks */}
+                  {aiAnalysis.split("\n").map((line, index) => {
+                    if (line.startsWith("###")) {
+                      return <h4 key={index} className="text-white font-bold text-sm border-b border-brand-border pb-1 mt-3 first:mt-0">{line.replace("###", "").trim()}</h4>;
+                    } else if (line.startsWith("####")) {
+                      return <h5 key={index} className="text-brand-green font-bold text-xs mt-2">{line.replace("####", "").trim()}</h5>;
+                    } else if (line.startsWith("1.") || line.startsWith("2.") || line.startsWith("3.")) {
+                      return <p key={index} className="pl-3 border-l border-brand-green text-xs" style={{ whiteSpace: "pre-wrap" }}>{line}</p>;
+                    } else if (line.startsWith("-") || line.startsWith("*")) {
+                      return <li key={index} className="list-disc list-inside text-gray-300 ml-1" style={{ whiteSpace: "pre-wrap" }}>{line.substring(2)}</li>;
+                    } else if (line.startsWith("|")) {
+                      return <div key={index} className="my-1.5 p-1 bg-brand-card/50 border border-brand-border/40 font-mono text-[11px] overflow-x-auto rounded">{line}</div>;
+                    } else {
+                      return <p key={index} className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>{line}</p>;
+                    }
+                  })}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full text-center text-gray-500 py-6" id="ai-empty-prompt">
+                  <Sparkles className="h-10 w-10 text-brand-border mb-3 animate-pulse" />
+                  <p className="text-sm font-semibold text-gray-400">Gemini Intelligence Console</p>
+                  <p className="text-xs text-gray-500 max-w-sm mt-1 leading-relaxed">
+                    Trigger the automated compiler down below. The Gemini model parses your exact stock beta spreads, assessing collateral deficits under severe market crash scenarios.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-brand-border/60 flex items-center justify-between text-xs text-gray-400 font-mono" id="ai-footer-diagnostics">
+            <span>Model: gemini-3.5-flash</span>
+            <span className="flex items-center gap-1 text-brand-green font-bold">
+              <span className="h-1.5 w-1.5 rounded-full bg-brand-green animate-ping" />
+              Sentry Stress Engine Active
+            </span>
           </div>
         </div>
       </section>
 
-      {/* Main Single-Screen Content Grid */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 relative" id="layout-grid">
+      {/* Row: Active Positions Table & Interactive Order Terminal */}
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8" id="grid-table-and-terminal">
         
-        {/* LEFT / TOP COLUMN: Overall Gauges and Integration metrics */}
-        <section className="lg:col-span-4 flex flex-col gap-6" id="left-sidebar-metrics">
-          
-          {/* Sentry API access or Paper badge warning warnings */}
-          <div className="bg-brand-card border border-brand-border rounded-xl p-5 text-left">
-            <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3.5 flex items-center justify-between">
-              <span>{mode === "mock" ? "SYSTEM PAPER trading sandbox" : "ALPACA LIVE API integration"}</span>
-              <span className={`w-2 h-2 rounded-full ${mode === "real" && isConnected ? "bg-[#ff9f43] shadow-[0_0_6px_#ff9f43]" : "bg-brand-yellow"}`} />
-            </h3>
+        {/* Positions and Price Shocker Console */}
+        <div id="col-positions-container" className="lg:col-span-2 bg-brand-card rounded-xl p-6 border border-brand-border">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 border-b border-brand-border pb-4" id="positions-header-and-refresh">
+            <h2 className="text-lg font-bold text-white flex items-center gap-2.5 font-mono">
+              <Sliders className="text-[#00e676] h-5 w-5" />
+              ACTIVE PORTFOLIO WORKSPACE
+            </h2>
+            
+            <div className="flex items-center gap-2 self-start sm:self-center" id="positions-head-controls">
+              {useAlpacaLive && (
+                <button
+                  id="refresh-positions-button"
+                  onClick={handleRefreshData}
+                  disabled={isRefreshing}
+                  className="p-2 bg-brand-border hover:bg-brand-border/85 border border-brand-border text-gray-300 hover:text-white rounded-lg flex items-center gap-1.5 text-xs transition font-semibold"
+                >
+                  <RefreshCw className={`h-3 w-3 ${isRefreshing ? "animate-spin" : ""}`} />
+                  <span>Sync Balance</span>
+                </button>
+              )}
 
-            {mode === "mock" ? (
-              <div className="space-y-3.5">
-                <div className="p-3.5 bg-brand-yellow/5 border border-brand-yellow/20 rounded-lg text-xs leading-relaxed font-sans text-gray-300">
-                  <div className="font-bold flex items-center gap-1.5 mb-1 text-brand-yellow">
-                    <Info className="w-3.5 h-3.5" />
-                    SIMULATED ENVIRONMENT
-                  </div>
-                  Continuous loop auto-trading is active using mock random-walk generators. Switch to LIVE mode to plug Alpaca API credentials.
+              {!useAlpacaLive && (
+                <div className="flex gap-1.5 bg-brand-bg p-1 rounded-lg border border-brand-border" id="price-shocker-toolbelt">
+                  <span className="text-[10px] text-gray-500 font-bold self-center px-1 font-mono uppercase tracking-wider">Prices Shock:</span>
+                  <button
+                    id="price-shock-up"
+                    onClick={() => handleShockPrices(1.2)}
+                    className="p-1 px-2.5 text-[10px] font-mono bg-emerald-950/40 text-brand-green border border-emerald-900/60 hover:bg-emerald-950 rounded transition"
+                    title="Shock stock prices upward (+20%)"
+                  >
+                    +20%
+                  </button>
+                  <button
+                    id="price-shock-down"
+                    onClick={() => handleShockPrices(0.8)}
+                    className="p-1 px-2.5 text-[10px] font-mono bg-red-950/40 text-brand-red border border-red-900/60 hover:bg-red-950 rounded transition"
+                    title="Shock stock prices downward (-20%)"
+                  >
+                    -20%
+                  </button>
+                  <button
+                    id="price-shock-crash"
+                    onClick={() => handleShockPrices(0.6)}
+                    className="p-[3px] px-2.5 text-[10px] font-mono bg-red-950/70 text-bold text-brand-red border border-brand-red/40 hover:bg-red-950 rounded animate-pulse transition"
+                    title="Simulate severe systemic margin crash (-40%)"
+                  >
+                    -40% CRASH
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Active Positions Table */}
+          <div className="overflow-x-auto" id="positions-table-overflow">
+            <table className="w-full text-left border-collapse" id="positions-table">
+              <thead>
+                <tr className="border-b border-brand-border/70 text-gray-400 text-xs font-semibold tracking-wider font-mono">
+                  <th className="py-3 px-3 uppercase">Asset Ticker</th>
+                  <th className="py-3 px-3 text-right uppercase">Position Shares</th>
+                  <th className="py-3 px-3 text-right uppercase">Market Value</th>
+                  <th className="py-3 px-3 text-right uppercase">Risk Beta</th>
+                  <th className="py-3 px-3 text-right uppercase">Margin Maint%</th>
+                  <th className="py-3 px-3 text-right uppercase">Unrealized P/L</th>
+                  {!useAlpacaLive && <th className="py-3 px-3 text-center uppercase">Action</th>}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-brand-border/40 text-sm font-mono" id="positions-table-body">
+                {activePositions.length > 0 ? (
+                  activePositions.map((pos) => {
+                    const plVal = pos.unrealized_pl !== undefined ? pos.unrealized_pl : (pos.current_price - pos.avg_entry_price) * pos.qty;
+                    const isPlPositive = plVal >= 0;
+
+                    // Beta multiplier estimates
+                    let assetBeta = 1.0;
+                    if (pos.symbol === "AAPL") assetBeta = 1.1;
+                    else if (pos.symbol === "NVDA") assetBeta = 1.9;
+                    else if (pos.symbol === "TSLA") assetBeta = 1.6;
+                    else if (pos.symbol === "BTCUSD") assetBeta = 2.4;
+
+                    return (
+                      <tr key={pos.symbol} className="hover:bg-brand-card/45 transition">
+                        <td className="py-3.5 px-3">
+                          <div className="font-bold text-white text-base" id={`ticker-${pos.symbol}`}>
+                            {pos.symbol}
+                          </div>
+                          <div className="text-[10px] text-gray-500 max-w-[100px] truncate" id={`ticker-subtext-${pos.symbol}`}>
+                            Entry: ${pos.avg_entry_price.toFixed(2)}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-3 text-right text-gray-200">
+                          <div className="text-sm font-semibold">{pos.qty}</div>
+                          <div className="text-[11px] text-gray-450 text-gray-400">Quote: ${pos.current_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                        </td>
+                        <td className="py-3.5 px-3 text-right text-white font-semibold">
+                          ${(pos.qty * pos.current_price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+                        <td className="py-3.5 px-3 text-right">
+                          <span className={`p-1 text-xs rounded leading-none ${assetBeta > 1.8 ? "text-brand-red bg-brand-red/10 border border-brand-red/20 font-bold" : "text-gray-330 text-gray-300"}`}>
+                            {assetBeta}x
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-3 text-right text-yellow-500 font-bold">
+                          {(pos.maintenance_margin_rate * 100).toFixed(0)}%
+                        </td>
+                        <td className={`py-3.5 px-3 text-right ${isPlPositive ? "text-brand-green" : "text-brand-red animate-pulse"}`}>
+                          <div className="font-bold text-sm">
+                            {isPlPositive ? "+" : ""}${plVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </div>
+                          <div className="text-[10px] font-medium">
+                            {isPlPositive ? "▲" : "▼"} {((plVal / (pos.qty * pos.avg_entry_price || 1)) * 100).toFixed(2)}%
+                          </div>
+                        </td>
+                        {!useAlpacaLive && (
+                          <td className="py-3.5 px-3 text-center">
+                            <button
+                              id={`delete-mock-pos-${pos.symbol}`}
+                              onClick={() => handleDeleteMockPosition(pos.symbol)}
+                              className="text-gray-500 hover:text-brand-red transition p-1 hover:bg-brand-red/10 rounded"
+                              title="Delete simulated position from risk matrix"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <tr id="empty-table-prompt">
+                    <td colSpan={useAlpacaLive ? 6 : 7} className="py-12 text-center text-gray-500">
+                      <div className="flex flex-col items-center justify-center">
+                        <DollarSign className="h-10 w-10 text-brand-border/80 mb-2" />
+                        <p className="text-sm font-semibold">Workspace Collateral is Empty</p>
+                        <p className="text-xs text-gray-505 text-gray-500 max-w-sm mt-1">
+                          No active positions found in {useAlpacaLive ? "this Alpaca account portfolio" : "simulator mode"}. Submit buy orders on the terminal right side to construct asset balance.
+                        </p>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* New Simulated Asset Fast Inject Form */}
+          {!useAlpacaLive && (
+            <form onSubmit={handleAddNewPosition} className="mt-6 pt-5 border-t border-brand-border block" id="fast-inject-position-form">
+              <span className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-3 font-mono">
+                ⚡ Inject Simulated Margin Holding
+              </span>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3" id="fast-inject-row">
+                <input
+                  type="text"
+                  placeholder="Ticker (e.g. AAPL)"
+                  value={newSymbol}
+                  onChange={(e) => setNewSymbol(e.target.value)}
+                  className="bg-brand-bg rounded-lg border border-brand-border p-2 text-xs font-mono text-white tracking-widest focus:outline-none focus:border-brand-green uppercase"
+                />
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="Shares Qty"
+                  value={newQty}
+                  onChange={(e) => setNewQty(e.target.value)}
+                  className="bg-brand-bg rounded-lg border border-brand-border p-2 text-xs font-mono text-white focus:outline-none focus:border-brand-green"
+                />
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="Asset Price ($)"
+                  value={newPrice}
+                  onChange={(e) => setNewPrice(e.target.value)}
+                  className="bg-brand-bg rounded-lg border border-brand-border p-2 text-xs font-mono text-white focus:outline-none focus:border-brand-green"
+                />
+                <div className="relative" id="inject-maint-input">
+                  <input
+                    type="number"
+                    min="10"
+                    max="100"
+                    placeholder="Maint Burden%"
+                    value={newMaint}
+                    onChange={(e) => setNewMaint(e.target.value)}
+                    className="bg-brand-bg w-full rounded-lg border border-brand-border p-2 text-xs font-mono text-white focus:outline-none focus:border-brand-green pr-6"
+                  />
+                  <span className="absolute right-2 top-2 text-[10px] text-gray-500 font-bold font-mono">%</span>
                 </div>
                 <button
-                  onClick={() => setMode("real")}
-                  className="w-full text-center py-2 bg-brand-bg hover:bg-brand-card text-gray-300 text-xs font-semibold rounded-lg transition border border-brand-border cursor-pointer font-sans"
-                  id="switch-keys-form"
+                  type="submit"
+                  id="submit-fast-inject"
+                  className="col-span-2 md:col-span-1 bg-brand-green/20 hover:bg-brand-green/35 text-brand-green border border-brand-green/35 hover:border-brand-green font-bold text-xs uppercase rounded-lg transition p-2 flex items-center justify-center gap-1 font-mono"
                 >
-                  Configure Alpaca Live keys
+                  <Plus className="h-4 w-4" />
+                  <span>Add Position</span>
                 </button>
               </div>
-            ) : (
-              <div className="space-y-4">
-                {errorText && (
-                  <div className="p-3 bg-brand-red/10 border border-brand-red/30 rounded-lg flex items-start gap-2.5">
-                    <AlertTriangle className="text-brand-red w-3.5 h-3.5 shrink-0 mt-0.5" />
-                    <span className="text-xs text-brand-red leading-snug font-mono">{errorText}</span>
-                  </div>
-                )}
+            </form>
+          )}
+        </div>
 
-                <div className="p-3 bg-[#e67e22]/10 border border-[#e67e22]/30 rounded-lg text-xs leading-relaxed text-[#e67e22] font-semibold flex flex-col gap-1.5 font-sans mb-3 text-left">
-                  <span>⚠️ WARNING: live trading operations involve severe capital hazards.</span>
-                  <span>Ensure your API boundaries limits and automated algorithms are fully auditioned in paper simulation mode before scaling configurations.</span>
+        {/* Interactive Order Terminal + Sentry Autopilot Switcher */}
+        <div id="col-order-terminal" className="bg-brand-card rounded-xl p-5 border border-brand-border flex flex-col justify-between">
+          <div>
+            {/* Custom Tab Headings */}
+            <div className="grid grid-cols-2 gap-2 mb-4 bg-brand-bg p-1 rounded-lg border border-brand-border" id="terminal-tab-selectors">
+              <button
+                type="button"
+                onClick={() => setTradeFormTab("manual")}
+                className={`py-2 px-3 rounded-md text-xs font-mono font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition whitespace-nowrap ${
+                  tradeFormTab === "manual"
+                    ? "bg-brand-card text-brand-green border border-brand-border/40 shadow-sm"
+                    : "text-gray-400 hover:text-white"
+                }`}
+              >
+                <Zap className="h-3.5 w-3.5 text-brand-green" />
+                Manual Terminal
+              </button>
+              <button
+                type="button"
+                onClick={() => setTradeFormTab("autopilot")}
+                className={`py-2 px-3 rounded-md text-xs font-mono font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition whitespace-nowrap ${
+                  tradeFormTab === "autopilot"
+                    ? "bg-brand-card text-brand-green border border-brand-border/40 shadow-sm"
+                    : "text-gray-400 hover:text-white"
+                }`}
+              >
+                <Cpu className={`h-3.5 w-3.5 ${isAutopilotActive ? "text-brand-green animate-pulse" : "text-gray-400"}`} />
+                Sentry Autopilot
+              </button>
+            </div>
+
+            {tradeFormTab === "manual" ? (
+              <div id="manual-terminal-section">
+                <h2 className="text-sm font-bold text-white flex items-center gap-2 mb-4 border-b border-brand-border pb-3 font-mono">
+                  <Zap className="text-brand-green h-4 w-4" />
+                  BROKER WORK TERMINAL
+                </h2>
+
+                {/* Quick stock select pills */}
+                <div className="mb-4" id="quick-pickers-block">
+                  <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2 font-mono">Quick Tickers</span>
+                  <div className="flex flex-wrap gap-2" id="quick-tickers-group">
+                    {["AAPL", "NVDA", "TSLA", "BTCUSD", "MSFT"].map((symbol) => (
+                      <button
+                        key={symbol}
+                        id={`quick-ticker-pill-${symbol}`}
+                        type="button"
+                        onClick={() => setOrderSymbol(symbol)}
+                        className={`p-1 px-3 rounded text-xs transition font-semibold font-mono ${
+                          orderSymbol === symbol
+                            ? "bg-brand-green text-brand-bg font-bold border border-brand-green"
+                            : "bg-brand-bg text-gray-400 hover:text-white border border-brand-border"
+                        }`}
+                      >
+                        {symbol}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
-                <div className="space-y-3 text-xs">
+                <div className="space-y-4" id="order-form-inputs">
                   <div>
-                    <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1 font-mono">API Key ID</label>
-                    <input
-                      type="text"
-                      className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-white font-mono placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-green"
-                      placeholder="APCA-API-KEY-ID"
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1 flex justify-between items-center font-mono">
-                      <span>Secret Key</span>
-                      <button
-                        onClick={() => setShowSecret(!showSecret)}
-                        className="text-gray-500 hover:text-gray-300 flex items-center gap-0.5 lowercase font-normal cursor-pointer"
-                      >
-                        {showSecret ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                        {showSecret ? "hide" : "show"}
-                      </button>
+                    <label className="block text-xs font-semibold text-gray-350 text-gray-350 uppercase tracking-wider mb-1 font-mono">
+                      Asset / Equity Symbol
                     </label>
                     <input
-                      type={showSecret ? "text" : "password"}
-                      className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-white font-mono placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-green"
-                      placeholder="APCA-API-SECRET-KEY"
-                      value={apiSecret}
-                      onChange={(e) => setApiSecret(e.target.value)}
+                      type="text"
+                      id="order-symbol-input"
+                      placeholder="e.g. AAPL"
+                      value={orderSymbol}
+                      onChange={(e) => setOrderSymbol(e.target.value.toUpperCase())}
+                      className="w-full bg-brand-bg rounded-lg border border-brand-border p-2 text-sm text-white focus:outline-none focus:border-brand-green font-mono uppercase"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1 font-mono">Broker endpoint</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        onClick={() => setIsPaper(true)}
-                        className={`py-1.5 rounded-lg border text-[10px] font-bold font-mono transition cursor-pointer ${
-                          isPaper
-                            ? "bg-brand-bg border-brand-border text-brand-yellow"
-                            : "bg-brand-card border-brand-border text-gray-500"
-                        }`}
-                      >
-                        PAPER APCA
-                      </button>
-                      <button
-                        onClick={() => setIsPaper(false)}
-                        className={`py-1.5 rounded-lg border text-[10px] font-bold font-mono transition cursor-pointer ${
-                          !isPaper
-                            ? "bg-brand-bg border-brand-border text-brand-green"
-                            : "bg-brand-card border-brand-border text-gray-500"
-                        }`}
-                      >
-                        LIVE ALPACA
-                      </button>
+                    <div className="flex justify-between items-center mb-1">
+                      <label className="block text-xs font-semibold text-gray-350 uppercase tracking-wider font-mono">
+                        Share Quantity (Fractional Support)
+                      </label>
+                      {activeCash > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const targetSym = orderSymbol.toUpperCase().trim();
+                            if (!targetSym) return;
+                            let estPrice = 150.0;
+                            const matchedTicker = activePositions.find((p) => p.symbol === targetSym);
+                            if (matchedTicker) {
+                              estPrice = matchedTicker.current_price;
+                            } else {
+                              if (targetSym === "AAPL") estPrice = 182.2;
+                              else if (targetSym === "TSLA") estPrice = 195.0;
+                              else if (targetSym === "NVDA") estPrice = 115.5;
+                              else if (targetSym === "BTCUSD") estPrice = 67200.0;
+                              else if (targetSym === "MSFT") estPrice = 425.0;
+                            }
+                            // Scale using 70% of power/cash to cover safety buffer/slippage requirements (30% buffer)
+                            const safeQty = (activeCash * 0.70) / estPrice;
+                            const finalQty = targetSym === "BTCUSD" ? parseFloat(safeQty.toFixed(4)) : parseFloat(safeQty.toFixed(2));
+                            if (finalQty > 0) {
+                              setOrderQty(finalQty.toString());
+                            }
+                          }}
+                          className="text-[10px] text-brand-green hover:underline uppercase font-mono font-bold"
+                          title="Fills the maximum affordable shares using 70% of available cash/buying power to meet Alpaca order buffers"
+                        >
+                          Use Max Affordable
+                        </button>
+                      )}
                     </div>
+                    <input
+                      type="text"
+                      id="order-qty-input"
+                      placeholder="e.g. 1.25 or 10"
+                      value={orderQty}
+                      onChange={(e) => setOrderQty(e.target.value)}
+                      className="w-full bg-brand-bg rounded-lg border border-brand-border p-2 text-sm text-white focus:outline-none focus:border-brand-green font-mono"
+                    />
+                  </div>
+
+                  <div id="terminal-fee-notice" className="rounded-lg bg-brand-bg p-3 border border-brand-border text-[11px] text-gray-400 leading-relaxed font-mono">
+                    <span className="text-[#00e676] font-bold">INFO:</span> Orders trigger at estimated spot market quotes. Live terminal modes issue standard Day orders directly to Alpaca. Fractional quantities are converted to exact string values.
+                  </div>
+
+                  {/* Order Status Reports */}
+                  {orderError && (
+                    <div id="order-error-report" className="p-3 bg-red-950/35 border border-brand-red rounded-lg text-brand-red text-xs font-mono">
+                      {orderError}
+                    </div>
+                  )}
+                  {orderSuccess && (
+                    <div id="order-success-report" className="p-3 bg-emerald-950/35 border border-brand-green rounded-lg text-brand-green text-xs font-mono">
+                      {orderSuccess}
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 mt-6" id="order-execution-buttons">
+                  <button
+                    id="submit-buy-button"
+                    type="button"
+                    onClick={() => handleSubmitOrder("BUY")}
+                    disabled={isPlacingOrder}
+                    className="bg-brand-green hover:bg-brand-green/90 text-brand-bg font-extrabold text-xs uppercase tracking-wider p-3 rounded-lg transition disabled:opacity-50 font-mono"
+                  >
+                    Execute Buy
+                  </button>
+                  <button
+                    id="submit-sell-button"
+                    type="button"
+                    onClick={() => handleSubmitOrder("SELL")}
+                    disabled={isPlacingOrder}
+                    className="bg-transparent hover:bg-red-500/10 border border-brand-red text-brand-red font-extrabold text-xs uppercase tracking-wider p-3 rounded-lg transition disabled:opacity-50 font-mono"
+                  >
+                    Execute Sell
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div id="autopilot-terminal-section" className="space-y-4">
+                <div className="flex items-center justify-between border-b border-brand-border pb-3">
+                  <h2 className="text-sm font-bold text-white flex items-center gap-2 font-mono">
+                    <Cpu className="text-brand-green h-4 w-4" />
+                    SENTRY AUTOPILOT
+                  </h2>
+                  <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                    <span className="text-gray-400">Target Mode:</span>
+                    <span className={`font-bold uppercase ${useAlpacaLive ? "text-brand-red" : "text-brand-green"}`}>
+                      {useAlpacaLive ? "Live Alpaca" : "Simulator"}
+                    </span>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 pt-1">
-                  <button
-                    onClick={fetchLiveData}
-                    disabled={isRefreshing || !apiKey || !apiSecret}
-                    className="flex-1 bg-[#ff9f43] hover:bg-[#ff9f43]/95 disabled:bg-brand-card text-black disabled:text-gray-600 font-bold text-xs py-2 rounded-lg transition duration-200 cursor-pointer text-center"
-                    id="connect-alpaca-btn"
-                  >
-                    {isRefreshing ? "Retesting API..." : "Verify & Inject Keys"}
-                  </button>
-                  {isConnected && (
+                {/* Sentry Autopilot Master Switch */}
+                <div className="mb-4" id="autopilot-activation-block">
+                  {!isAutopilotActive ? (
                     <button
-                      onClick={handleDisconnect}
-                      className="p-2 border border-brand-red bg-brand-red/10 hover:bg-brand-red/20 text-brand-red text-xs font-bold rounded-lg transition cursor-pointer"
+                      type="button"
+                      id="start-autopilot-btn"
+                      onClick={() => setIsAutopilotActive(true)}
+                      className="w-full py-3 bg-brand-green hover:bg-brand-green/90 text-brand-bg font-black text-xs uppercase tracking-widest rounded-lg transition duration-150 flex items-center justify-center gap-2 shadow-lg shadow-brand-green/10 font-mono"
                     >
-                      Close API
+                      <Play className="h-4 w-4 fill-brand-bg" />
+                      🔴 START AUTOPILOT BOT
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      id="stop-autopilot-btn"
+                      onClick={() => setIsAutopilotActive(false)}
+                      className="w-full py-3 bg-brand-red text-white hover:bg-brand-red/90 font-black text-xs uppercase tracking-widest rounded-lg transition duration-150 flex items-center justify-center gap-2 animate-pulse shadow-lg shadow-brand-red/20 font-mono"
+                    >
+                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-white mr-1 shadow shadow-white" />
+                      🟢 SENTRY BOT ONLINE (ABORT)
                     </button>
                   )}
+                  <p className="text-[10px] text-gray-500 font-mono mt-1.5 text-center">
+                    {isAutopilotActive 
+                      ? "Bot is actively intercepting and optimizing positions automatically."
+                      : "Bot idle. Activate to take over trading based on rules / AI directives."}
+                  </p>
+                </div>
+
+                {/* Configurator parameters inside standard flex rows */}
+                <div className="bg-brand-bg/60 p-3 rounded-lg border border-brand-border space-y-3.5 text-xs font-mono" id="autopilot-params-box">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                      Strategy Selection
+                    </label>
+                    <select
+                      id="autopilot-strategy-select"
+                      value={autopilotStrategy}
+                      onChange={(e) => setAutopilotStrategy(e.target.value as any)}
+                      className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                    >
+                      <option value="GEMINI_AI">🤖 Gemini AI Smart Director (Analytical)</option>
+                      <option value="SENTRY_HEAL">🛡️ Deleverage Margin Defender (Self-Healer)</option>
+                      <option value="SCALPER">⚡ Quick micro-Scalper (Momentum Oscillator)</option>
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3" id="target-and-interval-row">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                        Symbol target
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. AAPL"
+                        value={autopilotTargetTicker}
+                        onChange={(e) => setAutopilotTargetTicker(e.target.value.toUpperCase().trim())}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 uppercase font-mono tracking-widest focus:outline-none focus:border-brand-green"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                        Scan Frequency
+                      </label>
+                      <select
+                        value={autopilotInterval}
+                        onChange={(e) => setAutopilotInterval(parseInt(e.target.value))}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                      >
+                        <option value="10">Every 10 Seconds</option>
+                        <option value="15">Every 15 Seconds</option>
+                        <option value="30">Every 30 Seconds</option>
+                        <option value="60">Every 60 Seconds</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Simulator drift toggle */}
+                  {!useAlpacaLive && (
+                    <div className="flex items-center gap-2 pt-1 border-t border-brand-border/40" id="drift-toggle-row">
+                      <input
+                        type="checkbox"
+                        id="check-drift-active"
+                        checked={isTickStreamActive}
+                        onChange={(e) => setIsTickStreamActive(e.target.checked)}
+                        className="rounded bg-brand-bg border-brand-border text-brand-green focus:ring-0 cursor-pointer h-4 w-4"
+                      />
+                      <label htmlFor="check-drift-active" className="text-[10px] text-gray-400 font-mono font-semibold cursor-pointer">
+                        Run simulated market price drifts (ticks every 5s)
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                {/* Micro Real-time activity log specific to Sentry Autopilot */}
+                <div>
+                  <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 font-mono">
+                    🤖 Autopilot Activity feed
+                  </span>
+                  <div className="bg-brand-bg rounded-lg border border-brand-border p-2.5 max-h-[140px] overflow-y-auto space-y-1 text-[10px] font-mono leading-relaxed" id="autopilot-logs-display">
+                    {autopilotLogs.map((lg) => {
+                      let col = "text-gray-450 text-gray-400";
+                      if (lg.type === "success") col = "text-brand-green font-semibold";
+                      if (lg.type === "warn") col = "text-yellow-400 font-bold";
+                      if (lg.type === "trade") col = "text-[#38bdf8] font-bold uppercase tracking-wide";
+
+                      return (
+                        <div key={lg.id} className="flex gap-1.5 items-start">
+                          <span className="text-gray-500 shrink-0 select-none">[{lg.time}]</span>
+                          <span className={col}>{lg.msg}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             )}
           </div>
-
-          {/* Margin Utilization Radial Gauge */}
-          <div className="bg-brand-card border border-brand-border rounded-xl p-5 text-center relative overflow-hidden flex flex-col justify-between" id="utilization-gauge-card">
-            <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest text-left font-mono">Consolidated Margin usage</div>
-            
-            <div className="my-6 relative flex flex-col items-center">
-              <div className="relative w-36 h-36 flex items-center justify-center">
-                <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-                  <circle
-                    cx="50"
-                    cy="50"
-                    r="40"
-                    stroke="#14151a"
-                    strokeWidth="8"
-                    fill="transparent"
-                  />
-                  <circle
-                    cx="50"
-                    cy="50"
-                    r="40"
-                    stroke="#f1c40f"
-                    strokeWidth="8"
-                    fill="transparent"
-                    strokeDasharray={`${2 * Math.PI * 40}`}
-                    strokeDashoffset={`${2 * Math.PI * 40 * (1 - warningThreshold / 100)}`}
-                    className="opacity-20"
-                  />
-                  <circle
-                    cx="50"
-                    cy="50"
-                    r="40"
-                    stroke={
-                      marginUtilizationRatio >= criticalThreshold
-                        ? "#e74c3c"
-                        : marginUtilizationRatio >= warningThreshold
-                        ? "#f1c40f"
-                        : "#2ecc71"
-                    }
-                    strokeWidth="8"
-                    fill="transparent"
-                    strokeDasharray={`${2 * Math.PI * 40}`}
-                    strokeDashoffset={`${2 * Math.PI * 40 * (1 - Math.min(100, marginUtilizationRatio) / 100)}`}
-                    strokeLinecap="round"
-                    className="transition-all duration-500 ease-out"
-                  />
-                </svg>
-                
-                <div className="absolute flex flex-col items-center justify-center">
-                  <span className="text-3xl font-extrabold text-white font-mono leading-none">
-                    {marginUtilizationRatio.toFixed(1)}%
-                  </span>
-                  <span className="text-[10px] text-gray-500 mt-1.5 font-bold font-mono tracking-wider">
-                    {marginUtilizationRatio >= criticalThreshold
-                      ? "CRITICAL"
-                      : marginUtilizationRatio >= warningThreshold
-                      ? "WARNING"
-                      : "SECURE"}
-                  </span>
-                </div>
-              </div>
-
-              {marginUtilizationRatio >= warningThreshold && (
-                <div className="mt-3 flex items-center gap-1.5">
-                  <Flame className="w-4 h-4 text-brand-yellow animate-pulse" />
-                  <span className="text-[10px] text-brand-yellow font-bold uppercase tracking-wide font-mono">
-                    {marginUtilizationRatio >= criticalThreshold ? "Near Forced Liquidation" : "Safe buffers compressed"}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            <div className="pt-3 border-t border-brand-border flex justify-between text-xs text-gray-400 font-mono">
-              <div>
-                <span className="text-[9px] text-gray-500 uppercase block">Total MM</span>
-                <span className="font-bold text-gray-300">${maintenanceMargin?.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-              </div>
-              <div className="text-center">
-                <span className="text-[9px] text-gray-500 uppercase block">Cushion %</span>
-                <span className={`font-bold ${cushionPct < 25 ? "text-brand-red animate-pulse" : "text-brand-green"}`}>
-                  {cushionPct.toFixed(1)}%
-                </span>
-              </div>
-              <div className="text-right">
-                <span className="text-[9px] text-gray-500 uppercase block">Total Equity</span>
-                <span className="font-bold text-gray-300">${equity?.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* RIGHT COLUMN: Performance charts, Control panels & Main switchboard */}
-        <section className="lg:col-span-8 flex flex-col gap-6" id="right-center-panel">
-          
-          {/* Dual Charts block displaying Cushion flow AND P&L Equity curve over time (Bento Panel) */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6" id="bento-charts-block">
-            
-            {/* Cushion Flow Chart */}
-            <div className="bg-brand-card border border-brand-border rounded-xl p-5 text-left">
-              <div className="flex justify-between items-center mb-4">
-                <div>
-                  <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-1.5 font-mono">
-                    <Activity className="w-3.5 h-3.5 text-brand-green" />
-                    Margin cushion flow
-                  </h3>
-                  <p className="text-[10px] text-gray-500 mt-0.5">Sentry margin room tracker</p>
-                </div>
-                <div className="flex gap-3 font-mono text-[9px]">
-                  <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 bg-brand-green/20 border border-brand-green rounded-full" />
-                    <span className="text-gray-400">Net Cushion</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 bg-brand-red/20 border border-brand-red rounded-full" />
-                    <span className="text-gray-400">Maint. Margin</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="h-44 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={history} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
-                    <defs>
-                      <linearGradient id="cushGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#2ecc71" stopOpacity={0.2} />
-                        <stop offset="95%" stopColor="#2ecc71" stopOpacity={0.0} />
-                      </linearGradient>
-                      <linearGradient id="maintGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#e74c3c" stopOpacity={0.15} />
-                        <stop offset="95%" stopColor="#e74c3c" stopOpacity={0.0} />
-                      </linearGradient>
-                    </defs>
-                    <XAxis dataKey="time" stroke="#475569" fontSize={8} tickLine={false} />
-                    <YAxis stroke="#475569" fontSize={8} tickLine={false} tickFormatter={(v) => `$${Math.round(v / 1000)}k`} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "#111216", borderColor: "#1f2937", color: "#F1F5F9", fontSize: 10 }}
-                      formatter={(v: any) => [`$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`]}
-                    />
-                    <Area type="monotone" dataKey="cushion" stroke="#2ecc71" strokeWidth={1.5} fillOpacity={1} fill="url(#cushGrad)" />
-                    <Area type="monotone" dataKey="maintenanceMargin" stroke="#e74c3c" strokeWidth={1} fillOpacity={1} fill="url(#maintGrad)" />
-                    <ReferenceLine y={equity * (warningThreshold / 100)} stroke="#f1c40f" strokeDasharray="3 3" label={{ value: "Warning limit", position: "top", fill: "#f1c40f", fontSize: 8 }} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* P&L Terminal Performance Chart (Daily Equity Curve & Realized P&L Tracker) */}
-            <div className="bg-brand-card border border-brand-border rounded-xl p-5 text-left">
-              <div className="flex justify-between items-center mb-4">
-                <div>
-                  <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-1.5 font-mono">
-                    <TrendingUp className="w-3.5 h-3.5 text-[#2ecc71]" />
-                    P&L History Performance
-                  </h3>
-                  <p className="text-[10px] text-gray-500 mt-0.5">Real-time equity yield vs realized results</p>
-                </div>
-                <div className="flex gap-3 font-mono text-[9px]">
-                  <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 bg-brand-green border border-brand-green rounded-full" />
-                    <span className="text-gray-400">Equity Curve</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 bg-[#ff9f43] border border-[#ff9f43] rounded-full" />
-                    <span className="text-gray-400">Realized P&L</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="h-44 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={dailyPnlHistory} margin={{ top: 5, right: 5, left: -25, bottom: 0 }}>
-                    <XAxis dataKey="time" stroke="#475569" fontSize={8} tickLine={false} />
-                    <YAxis yAxisId="left" stroke="#2ecc71" fontSize={8} tickLine={false} tickFormatter={(v) => `$${Math.round(v / 1000)}k`} />
-                    <YAxis yAxisId="right" orientation="right" stroke="#ff9f43" fontSize={8} tickLine={false} tickFormatter={(v) => `$${v}`} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "#111216", borderColor: "#1f2937", color: "#F1F5F9", fontSize: 10 }}
-                    />
-                    <Line yAxisId="left" type="monotone" dataKey="equity" stroke="#2ecc71" strokeWidth={2} dot={false} />
-                    <Line yAxisId="right" type="monotone" dataKey="realizedPnl" stroke="#ff9f43" strokeWidth={1.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-          </div>
-
-          {/* LOWER SWITCHBOARD SWITCHER BLOCK */}
-          <div className="flex flex-col flex-1">
-            <div className="flex border-b border-brand-border text-xs font-sans mb-5 font-medium gap-1.5 overflow-x-auto scrollbar-none">
-              <button
-                onClick={() => setActiveTab("positions")}
-                className={`pb-2.5 px-3 border-b-2 text-left shrink-0 transition-all cursor-pointer ${
-                  activeTab === "positions"
-                    ? "border-brand-green text-brand-green font-bold"
-                    : "border-transparent text-gray-500 hover:text-gray-300"
-                }`}
-              >
-                Positions & Simulator
-              </button>
-              
-              <button
-                onClick={() => setActiveTab("executions")}
-                className={`pb-2.5 px-3 border-b-2 text-left shrink-0 transition-all cursor-pointer flex items-center gap-1.5 ${
-                  activeTab === "executions"
-                    ? "border-brand-green text-brand-green font-bold"
-                    : "border-transparent text-gray-500 hover:text-gray-300"
-                }`}
-              >
-                Orders & Executions
-                <span className="bg-brand-border text-gray-300 px-1.5 py-0.2 rounded text-[10px] font-mono font-bold">
-                  {orders.length}
-                </span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab("analysis")}
-                className={`pb-2.5 px-3 border-b-2 text-left shrink-0 transition-all cursor-pointer ${
-                  activeTab === "analysis"
-                    ? "border-brand-green text-brand-green font-bold"
-                    : "border-transparent text-gray-500 hover:text-gray-300"
-                }`}
-              >
-                AI Risk Audit
-              </button>
-              <button
-                onClick={() => setActiveTab("python")}
-                className={`pb-2.5 px-3 border-b-2 text-left shrink-0 transition-all cursor-pointer ${
-                  activeTab === "python"
-                    ? "border-brand-green text-brand-green font-bold"
-                    : "border-transparent text-gray-500 hover:text-gray-300"
-                }`}
-              >
-                Python Code Exporter
-              </button>
-              <button
-                onClick={() => setActiveTab("settings")}
-                className={`pb-2.5 px-3 border-b-2 text-left shrink-0 transition-all cursor-pointer ${
-                  activeTab === "settings"
-                    ? "border-brand-green text-brand-green font-bold"
-                    : "border-transparent text-gray-500 hover:text-gray-300"
-                }`}
-              >
-                Sentry Limits
-              </button>
-            </div>
-
-            {/* TAB SCREENS */}
-            <div className="flex-1 min-h-[400px]">
-              {activeTab === "positions" && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                  
-                  {/* Left block - Positions Table */}
-                  <div className="lg:col-span-8 flex flex-col gap-6">
-                    <PositionsTable
-                      positions={positions}
-                      isMock={mode === "mock"}
-                      onAddPosition={handleAddMockPosition}
-                      onRemovePosition={handleRemovePosition}
-                      onSimulateMarketDrop={handleSimulateMarketDrop}
-                      onResetSimulation={handleResetSimulation}
-                      onLiquidateAll={handleLiquidateAll}
-                      onResetPaperSettings={handleResetPaperSettings}
-                      isConnected={isConnected}
-                      isPlacingOrder={isPlacingOrder}
-                      onPlaceLiveOrder={handlePlaceLiveOrder}
-                      isPaper={isPaper}
-                    />
-                  </div>
-
-                  {/* Right side - Trading Control sidebar (Trade settings & Watchlist) */}
-                  <div className="lg:col-span-4 flex flex-col gap-6">
-                    
-                    {/* Strategy Control Panel */}
-                    <div className="bg-brand-card border border-brand-border rounded-xl p-5 text-left">
-                      <h4 className="text-xs font-bold text-gray-300 uppercase tracking-widest mb-3 flex items-center gap-1.5 font-mono">
-                        <Sliders className="w-3.5 h-3.5 text-brand-green" />
-                        Strategy control
-                      </h4>
-                      <p className="text-[10px] text-gray-500 mb-4 leading-relaxed font-sans">
-                        Configure rulesets parameters for algorithmic trades logic execution. High constraints lower concentration risks.
-                      </p>
-
-                      <div className="space-y-4 text-xs font-sans">
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1 font-mono">CORE ALGORITHM</label>
-                          <select
-                            value={selectedStrategy}
-                            onChange={(e) => setSelectedStrategy(e.target.value)}
-                            className="w-full bg-brand-bg border border-brand-border rounded-lg text-white font-bold p-2 focus:outline-none"
-                          >
-                            <option value="MOMENTUM_TRADER_V4">MOMENTUM_TRADER_V4 (SMA cross)</option>
-                            <option value="MEAN_REVERSION_V1" disabled>MEAN_REVERSION_V1 (RSI indicators)</option>
-                          </select>
-                        </div>
-
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1 font-mono">Watchlist targets</label>
-                          <div className="flex flex-wrap gap-1.5 p-1.5 bg-brand-bg border border-brand-border rounded-lg">
-                            {watchlist.map((sym) => (
-                              <span
-                                key={sym}
-                                className="px-2 py-0.5 bg-brand-border rounded text-[10px] font-mono font-bold text-gray-300 flex items-center gap-1"
-                              >
-                                {sym}
-                                <span className="text-[8px] text-brand-green">
-                                  ${tickerPrices[sym]?.toFixed(1)}
-                                </span>
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1 font-mono">Capital allocation %</label>
-                            <input
-                              type="number"
-                              value={maxCapitalPerTradePct}
-                              onChange={(e) => setMaxCapitalPerTradePct(Math.max(1, Number(e.target.value)))}
-                              className="w-full bg-brand-bg border border-brand-border rounded-lg text-white font-mono p-2 text-center"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1 font-mono">Max hold trades</label>
-                            <input
-                              type="number"
-                              value={maxOpenPositions}
-                              onChange={(e) => setMaxOpenPositions(Math.max(1, Number(e.target.value)))}
-                              className="w-full bg-brand-bg border border-brand-border rounded-lg text-white font-mono p-2 text-center"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1 text-red-400 font-mono">Stop-loss %</label>
-                            <input
-                              type="number"
-                              step="0.5"
-                              value={stopLossPct}
-                              onChange={(e) => setStopLossPct(Math.max(0.1, Number(e.target.value)))}
-                              className="w-full bg-brand-bg border border-brand-border rounded-lg text-white font-mono p-2 text-center"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] uppercase font-bold text-gray-500 mb-1 text-green-400 font-mono">Take profit %</label>
-                            <input
-                              type="number"
-                              step="0.5"
-                              value={takeProfitPct}
-                              onChange={(e) => setTakeProfitPct(Math.max(0.1, Number(e.target.value)))}
-                              className="w-full bg-brand-bg border border-brand-border rounded-lg text-white font-mono p-2 text-center"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between p-2.5 bg-brand-bg border border-brand-border rounded-lg mt-2">
-                          <span className="text-[11px] font-bold text-gray-400">Enable Strategies Module</span>
-                          <input
-                            type="checkbox"
-                            checked={strategyEnabled}
-                            onChange={(e) => {
-                              setStrategyEnabled(e.target.checked);
-                              addRiskLog("SYS", "STRAT_TOGGLE", e.target.checked, `Strategies signals processing set to ${e.target.checked}`);
-                            }}
-                            className="accent-brand-green w-4 h-4 cursor-pointer"
-                          />
-                        </div>
-
-                      </div>
-                    </div>
-
-                  </div>
-                </div>
-              )}
-
-              {/* ORDERS & EXECUTIONS TAB SCREEN */}
-              {activeTab === "executions" && (
-                <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start animate-fadeIn">
-                  
-                  {/* Left: Open Orders list */}
-                  <div className="xl:col-span-7 bg-brand-card border border-brand-border rounded-xl p-5 text-left">
-                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-1.5 font-mono">
-                      <Terminal className="text-brand-green w-4 h-4" />
-                      Algorithmic terminal open orders
-                    </h3>
-                    
-                    <div className="overflow-x-auto">
-                      {orders.length === 0 ? (
-                        <div className="p-8 text-center text-gray-500 text-xs">No active orders queued.</div>
-                      ) : (
-                        <table className="w-full text-xs font-sans text-left">
-                          <thead>
-                            <tr className="border-b border-brand-border text-gray-500 font-mono">
-                              <th className="pb-2.5">Symbol</th>
-                              <th className="pb-2.5">Side</th>
-                              <th className="pb-2.5 text-right">Qty</th>
-                              <th className="pb-2.5 text-right">Execution Price</th>
-                              <th className="pb-2.5">Status</th>
-                              <th className="pb-2.5">Time</th>
-                              <th className="pb-2.5">Strategy</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-brand-border/45">
-                            {orders.map((ord) => (
-                              <tr key={ord.id} className="hover:bg-brand-bg/40 transition">
-                                <td className="py-2.5 font-bold text-white">{ord.symbol}</td>
-                                <td className="py-2.5">
-                                  <span className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold uppercase ${ord.side === "BUY" ? "bg-brand-green/10 text-brand-green" : "bg-brand-red/10 text-brand-red"}`}>
-                                    {ord.side}
-                                  </span>
-                                </td>
-                                <td className="py-2.5 text-right font-mono text-gray-300">{ord.qty}</td>
-                                <td className="py-2.5 text-right font-mono text-gray-300">${ord.price?.toFixed(2)}</td>
-                                <td className="py-2.5 font-mono">
-                                  <span className="text-brand-green font-bold text-[10px] flex items-center gap-1">
-                                    <span className="w-1.5 h-1.5 bg-brand-green rounded-full shadow-[0_0_4px_#2ecc71] animate-pulse" />
-                                    FILLED
-                                  </span>
-                                </td>
-                                <td className="py-2.5 font-mono text-gray-500 text-[10px]">{ord.submittedAt}</td>
-                                <td className="py-2.5 text-[10px] text-gray-400 font-mono">{ord.strategyTag}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Right: Recent Fill transactions logs */}
-                  <div className="xl:col-span-5 bg-brand-card border border-brand-border rounded-xl p-5 text-left">
-                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-1.5 font-mono">
-                      <Sliders className="text-brand-yellow w-4 h-4" />
-                      Recent fills & realized gains impact
-                    </h3>
-                    
-                    <div className="space-y-3 max-h-[460px] overflow-y-auto pr-1">
-                      {recentFills.map((fill) => (
-                        <div key={fill.id} className="p-3 bg-[#0c0d11]/80 rounded-lg border border-brand-border flex items-center justify-between">
-                          <div className="text-left font-sans">
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-white">{fill.symbol}</span>
-                              <span className={`text-[8.5px] font-mono px-1 py-0.2 rounded font-bold ${fill.side === "BUY" ? "bg-brand-green/10 text-brand-green" : "bg-brand-red/10 text-brand-red"}`}>
-                                {fill.side === "BUY" ? "BUY_ENTRY" : "SELL_LIQUIDATE"}
-                              </span>
-                            </div>
-                            <div className="text-[10px] text-gray-500 font-mono mt-1">
-                              Filled {fill.qty} shs @ ${fill.price?.toFixed(2)} | {fill.filledAt}
-                            </div>
-                          </div>
-
-                          <div className="text-right">
-                            {fill.side === "SELL" ? (
-                              <div className="font-mono text-xs font-bold text-left">
-                                <div className="text-[9px] text-gray-550 uppercase">REALIZED P&L</div>
-                                <span className={fill.pnlImpact >= 0 ? "text-brand-green" : "text-brand-red"}>
-                                  {fill.pnlImpact >= 0 ? "+" : ""}${fill.pnlImpact.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                </span>
-                              </div>
-                            ) : (
-                              <div className="text-[9px] text-gray-600 font-mono">RECONCILED</div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                </div>
-              )}
-
-              {activeTab === "analysis" && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start animate-fadeIn">
-                  
-                  {/* Left Column: AI Audit */}
-                  <div className="lg:col-span-7 flex flex-col gap-6">
-                    <RiskAnalysis
-                      accountData={{
-                        equity,
-                        maintenance_margin: maintenanceMargin,
-                        initial_margin: initialMargin,
-                        daytrading_buying_power: dayTradingBP,
-                        regt_buying_power: regTBP,
-                        multiplier,
-                        pattern_day_trader: isPdt,
-                      }}
-                      positionsData={positions}
-                    />
-                  </div>
-
-                  {/* Right Column: Dynamic Risk Controls widgets & sliders */}
-                  <div className="lg:col-span-5 bg-brand-card border border-brand-border rounded-xl p-5 text-left space-y-6">
-                    <div>
-                      <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-1.5 font-mono">
-                        <ShieldCheck className="text-brand-green w-4 h-4" />
-                        Interactive Risk Safeguard Controls
-                      </h3>
-                      <p className="text-[10px] text-gray-500 mt-1">Configure limits parameters, automatic circuit-breakers and logs triggers.</p>
-                    </div>
-
-                    {/* Sized Limits settings */}
-                    <div className="space-y-4 text-xs font-sans">
-                      
-                      {/* Daily Loss limit */}
-                      <div className="p-3 bg-brand-bg border border-brand-border rounded-lg text-left">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="font-bold text-gray-400">Max daily drawdown limit %</span>
-                          <span className="font-mono text-brand-red font-bold">{maxDailyLossPct}%</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="1"
-                          max="15"
-                          step="0.5"
-                          value={maxDailyLossPct}
-                          onChange={(e) => setMaxDailyLossPct(Number(e.target.value))}
-                          className="w-full accent-brand-red h-1.5 rounded-lg cursor-pointer bg-brand-border"
-                        />
-                        
-                        <div className="mt-3.5 pt-2.5 border-t border-brand-border flex items-center justify-between text-[11px]">
-                          <span className="text-gray-550 header-title">Current Day Loss Trajectory</span>
-                          <span className="font-mono text-gray-400 font-bold">${currentDrawdownVal.toFixed(2)} ({currentDrawdownPct.toFixed(2)}%)</span>
-                        </div>
-                        <div className="w-full bg-brand-border h-2 rounded mt-1.5 overflow-hidden">
-                          <div
-                            className={`h-full rounded transition-all duration-300 ${currentDrawdownPct >= maxDailyLossPct ? "bg-brand-red shadow-[0_0_5px_#e74c3c]" : "bg-gradient-to-r from-brand-green to-brand-yellow"}`}
-                            style={{ width: `${Math.min(100, (currentDrawdownPct / maxDailyLossPct) * 100)}%` }}
-                          />
-                        </div>
-                        {currentDrawdownPct >= maxDailyLossPct && (
-                          <div className="text-[9px] text-brand-red font-bold uppercase tracking-wider mt-1.5 flex items-center gap-1">
-                            <AlertTriangle className="w-3 h-3 text-brand-red animate-pulse" /> Drawdown safety exceeded. Trading frozen.
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Max leverage */}
-                      <div>
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="font-bold text-gray-400">Maximum leverage multiplier limit</span>
-                          <span className="font-mono text-brand-yellow font-bold">{maxLeverage}x</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="1"
-                          max="4"
-                          step="0.1"
-                          value={maxLeverage}
-                          onChange={(e) => setMaxLeverage(Number(e.target.value))}
-                          className="w-full accent-brand-yellow h-1.5 rounded-lg cursor-pointer bg-brand-border"
-                        />
-                      </div>
-
-                      {/* Max position size */}
-                      <div>
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="font-bold text-gray-400">Max size allocation limit per trade</span>
-                          <span className="font-mono text-brand-green font-bold">{maxPositionSizePct}%</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="5"
-                          max="50"
-                          value={maxPositionSizePct}
-                          onChange={(e) => setMaxPositionSizePct(Number(e.target.value))}
-                          className="w-full accent-brand-green h-1.5 rounded-lg cursor-pointer bg-brand-border"
-                        />
-                        <span className="text-[9px] text-gray-500 mt-1 block font-mono">Guideline restricts manual or automated ticket sizing.</span>
-                      </div>
-
-                    </div>
-
-                    {/* Risk event Sentry Log */}
-                    <div className="pt-4 border-t border-brand-border">
-                      <div className="flex items-center justify-between mb-3 font-mono">
-                        <span className="text-[10px] font-bold text-gray-550 uppercase tracking-widest">Sentry Live Check log</span>
-                        <span className="text-[9px] text-brand-green animate-pulse">● RUNNING LOGS</span>
-                      </div>
-                      
-                      <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
-                        {riskCheckLog.map((log) => (
-                          <div key={log.id} className="p-2.5 bg-[#0a0b0d]/70 border border-brand-border/60 rounded font-mono text-[10px] flex items-start gap-2 text-left leading-relaxed">
-                            <span className={log.passed ? "text-brand-green shrink-0 font-bold" : "text-brand-red shrink-0 font-bold"}>
-                              {log.passed ? "[OK]" : "[FAIL]"}
-                            </span>
-                            <div className="flex-1">
-                              <span className="text-gray-550 font-semibold mr-1">[{log.timestamp}]</span>
-                              <span className="text-gray-400 mr-1">[{log.symbol}] {log.action}:</span>
-                              <span className="text-gray-300">{log.details}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                  </div>
-
-                </div>
-              )}
-
-              {activeTab === "python" && (
-                <div className="animate-fadeIn">
-                  <PythonExporter
-                    warningThreshold={warningThreshold}
-                    criticalThreshold={criticalThreshold}
-                    isPaper={isPaper}
-                  />
-                </div>
-              )}
-
-              {activeTab === "settings" && (
-                <div className="animate-fadeIn">
-                  <AlertSettings
-                    warningThreshold={warningThreshold}
-                    setWarningThreshold={setWarningThreshold}
-                    criticalThreshold={criticalThreshold}
-                    setCriticalThreshold={setCriticalThreshold}
-                    alerts={alerts}
-                    clearAlerts={() => setAlerts([])}
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
-      </main>
-
-      {/* Footer */}
-      <footer className="mt-auto border-t border-brand-border bg-[#0a0b0d] px-6 py-4 text-center text-[11px] text-gray-600 flex flex-col sm:flex-row items-center justify-between gap-2.5 font-mono">
-        <div className="flex gap-4">
-          <span>STRATEGY: MOMENTUM_TRADER_V4</span>
-          <span>HEARTBEAT RATE: 5s TICK</span>
-          <span>DAILY LOSS MARGINS: {maxDailyLossPct}%</span>
         </div>
-        <div className="flex gap-2 items-center">
-          <div className="w-1.5 h-1.5 rounded-full bg-brand-green animate-pulse"></div>
-          <span className="uppercase tracking-tighter text-gray-400">Terminals limits compliant</span>
+
+      </section>
+
+      {/* Row: Python SDK Integration Scripts Code Exporter */}
+      <section className="mb-8" id="section-python-exporter">
+        <div className="bg-brand-card rounded-xl p-6 border border-brand-border">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-4 border-b border-brand-border pb-3" id="exporter-head">
+            <div id="exporter-desc font-sans">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2.5 font-mono">
+                <Code className="text-brand-green h-5 w-5" />
+                PYTHON SENTRY SDK GENERATOR
+              </h2>
+              <p className="text-xs text-gray-400 mt-1">
+                Automated risk monitor. Replicate this terminal&apos;s alert limits and margin burden formulas inside clean local python trade daemons.
+              </p>
+            </div>
+            <button
+              id="copy-python-button"
+              onClick={() => copyToClipboard(pyScriptCode)}
+              className="bg-brand-border hover:bg-brand-border/80 border border-brand-border text-gray-300 font-semibold text-xs p-2.5 px-4 rounded-lg flex items-center gap-1.5 transition whitespace-nowrap self-start sm:self-center"
+            >
+              <Copy className="h-4 w-4" />
+              <span>Copy Automation Script</span>
+            </button>
+          </div>
+
+          {/* Copyable code block */}
+          <div className="relative" id="export-code-block-wrapper">
+            <pre className="bg-brand-bg rounded-xl border border-brand-border p-4 overflow-x-auto text-[11px] text-gray-300 font-mono leading-relaxed h-[210px]" id="python-pre-code">
+              <code>{pyScriptCode}</code>
+            </pre>
+          </div>
+        </div>
+      </section>
+
+      {/* Row: Active Sentry Logs audit log */}
+      <footer className="bg-brand-card rounded-xl p-5 border border-brand-border" id="app-footer">
+        <h2 className="text-sm font-bold text-white uppercase tracking-wider font-mono border-b border-brand-border pb-3.5 mb-4 flex items-center gap-2">
+          <Sliders className="text-gray-400 h-4 w-4" />
+          Sentry Live Audit Trail Logs
+        </h2>
+        
+        {/* Logs terminal box */}
+        <div className="bg-brand-bg rounded-xl border border-brand-border p-3.5 max-h-[160px] overflow-y-auto font-mono text-[11px] space-y-1.5" id="audit-logs-display">
+          {logs.map((log) => {
+            let colorClass = "text-gray-400";
+            if (log.status === "SUCCESS") colorClass = "text-brand-green font-bold";
+            if (log.status === "WARNING") colorClass = "text-yellow-400 font-bold";
+            if (log.status === "CRITICAL") colorClass = "text-brand-red font-extrabold uppercase animate-pulse";
+
+            return (
+              <div key={log.id} className="flex items-start gap-2.5 leading-relaxed hover:bg-brand-card/30 p-1 rounded transition" id={`log-${log.id}`}>
+                <span className="text-gray-500 shrink-0 select-none">[{log.timestamp}]</span>
+                <span className="text-[#00e676] shrink-0 font-bold uppercase">[{log.symbol}]</span>
+                <span className="text-blue-400 shrink-0 uppercase font-semibold">{log.action}:</span>
+                <span className={colorClass}>{log.message}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 mt-4 border-t border-brand-border/40 text-[10px] text-gray-500 font-mono" id="metadata-footer-row">
+          <span>Broker Terminal Suite. Persistent SSL Proxies securely mapped. Ready.</span>
+          <span className="flex items-center gap-1">
+            <span>Powered by Gemini 3.5 & Alpaca v2 REST</span>
+            <ExternalLink className="h-3 w-3" />
+          </span>
         </div>
       </footer>
+
     </div>
   );
 }

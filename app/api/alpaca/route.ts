@@ -1,13 +1,14 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const { apiKey, apiSecret, isPaper } = await req.json();
+    const body = await req.json();
+    const { apiKey, apiSecret, isPaper } = body;
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
-        { error: "Alpaca API Key and Secret are required." },
-        { status: 400 }
+        { error: "API Key or Secret missing." },
+        { status: 200 }
       );
     }
 
@@ -19,62 +20,62 @@ export async function POST(req: NextRequest) {
       "APCA-API-KEY-ID": apiKey,
       "APCA-API-SECRET-KEY": apiSecret,
       "Content-Type": "application/json",
+      "User-Agent": "Alpaca-Margin-Terminal/1.0",
     };
 
-    // Fetch account and positions in parallel
+    // Fetch account info and positions concurrently
     const [accountRes, positionsRes] = await Promise.all([
-      fetch(`${baseUrl}/v2/account`, { headers, method: "GET" }).catch((err) => {
-        console.error("Fetch account error:", err);
-        return null;
-      }),
-      fetch(`${baseUrl}/v2/positions`, { headers, method: "GET" }).catch((err) => {
-        console.error("Fetch positions error:", err);
-        return null;
-      }),
+      fetch(`${baseUrl}/v2/account`, { headers, cache: "no-store" }),
+      fetch(`${baseUrl}/v2/positions`, { headers, cache: "no-store" }),
     ]);
-
-    if (!accountRes || !positionsRes) {
-      return NextResponse.json(
-        { error: "Failed to connect to Alpaca API servers." },
-        { status: 502 }
-      );
-    }
-
-    if (accountRes.status === 401 || positionsRes.status === 401) {
-      return NextResponse.json(
-        { error: "Invalid Alpaca API Key or Secret. Clarify your credentials." },
-        { status: 401 }
-      );
-    }
 
     if (!accountRes.ok) {
       const errorText = await accountRes.text();
       return NextResponse.json(
-        { error: `Alpaca Account Error: ${errorText || accountRes.statusText}` },
-        { status: accountRes.status }
+        { error: `Alpaca authenticating error: ${errorText || accountRes.statusText}` },
+        { status: 200 }
       );
     }
 
-    if (!positionsRes.ok) {
-      const errorText = await positionsRes.text();
-      return NextResponse.json(
-        { error: `Alpaca Positions Error: ${errorText || positionsRes.statusText}` },
-        { status: positionsRes.status }
-      );
+    const accountData = await accountRes.json();
+    let positionsData = [];
+    if (positionsRes.ok) {
+      positionsData = await positionsRes.json();
+    } else {
+      console.error("Alpaca positions fetch failed, defaulting to empty");
     }
-
-    const account = await accountRes.json();
-    const positions = await positionsRes.json();
 
     return NextResponse.json({
-      account,
-      positions,
+      account: {
+        account_number: accountData.account_number,
+        cash: accountData.cash,
+        equity: accountData.equity,
+        buying_power: accountData.buying_power,
+        portfolio_value: accountData.portfolio_value,
+        regt_buying_power: accountData.regt_buying_power,
+        daytrading_buying_power: accountData.daytrading_buying_power,
+        maintenance_margin: accountData.maintenance_margin,
+        initial_margin: accountData.initial_margin,
+        long_market_value: accountData.long_market_value,
+        short_market_value: accountData.short_market_value,
+      },
+      positions: positionsData.map((pos: any) => ({
+        symbol: pos.symbol,
+        qty: parseFloat(pos.qty),
+        side: pos.side,
+        avg_entry_price: parseFloat(pos.avg_entry_price),
+        current_price: parseFloat(pos.current_price),
+        market_value: parseFloat(pos.market_value),
+        unrealized_pl: parseFloat(pos.unrealized_pl),
+        unrealized_plpc: parseFloat(pos.unrealized_plpc),
+        maintenance_margin_rate: 0.30, // Default fallback margin rate for standard risk calculation
+      })),
     });
   } catch (error: any) {
-    console.error("Alpaca API Route Error:", error);
+    console.error("Alpaca Proxy Error:", error);
     return NextResponse.json(
-      { error: error?.message || "An unexpected error occurred while communicating with Alpaca." },
-      { status: 500 }
+      { error: error?.message || "Internal server error connecting to Alpaca." },
+      { status: 200 }
     );
   }
 }

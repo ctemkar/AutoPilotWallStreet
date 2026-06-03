@@ -1,26 +1,32 @@
-import type { Metadata } from 'next';
-import { Inter, JetBrains_Mono } from 'next/font/google';
-import './globals.css'; // Global styles
+import type { Metadata } from "next";
+import { Inter, JetBrains_Mono } from "next/font/google";
+import "./globals.css";
 
 const inter = Inter({
-  subsets: ['latin'],
-  variable: '--font-sans',
+  subsets: ["latin"],
+  variable: "--font-sans",
 });
 
 const jetbrainsMono = JetBrains_Mono({
-  subsets: ['latin'],
-  variable: '--font-mono',
+  subsets: ["latin"],
+  variable: "--font-mono",
 });
 
 export const metadata: Metadata = {
-  title: 'Alpaca Real-Time Intraday Margin Sentry',
-  description: 'Track intraday margin utilization, open positions, risk thresholds, and download automated background sentinel monitoring scripts.',
+  title: "Alpaca Margin & Risk Terminal",
+  description: "Real-time margin risk analyzer and simulated broker terminal with live Alpaca API integration.",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
-      <body suppressHydrationWarning className="bg-brand-bg font-sans">{children}</body>
+    <html lang="en" className={`dark ${inter.variable} ${jetbrainsMono.variable}`}>
+      <body className="font-sans antialiased bg-brand-bg text-brand-text min-h-screen">
+        {children}
+      </body>
     </html>
   );
 }

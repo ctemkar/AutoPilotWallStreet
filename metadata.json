@@ -1,6 +1,6 @@
 {
-  "name": "Alpaca Intraday Margin Dashboard",
-  "description": "Real-time Alpaca API intraday margin utilization and risk monitor with alert triggers and Python code exporter.",
+  "name": "Alpaca Margin & Risk Terminal",
+  "description": "Interactive real-time margin risk analyzer and simulated broker terminal with live Alpaca API integration for fractional trading and Sentry risk limits.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
