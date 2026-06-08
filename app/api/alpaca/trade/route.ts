@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { apiKey, apiSecret, isPaper, symbol, qty, side } = body;
+    const { apiKey, apiSecret, isPaper, symbol, qty, side, notional } = body;
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
@@ -12,9 +14,12 @@ export async function POST(req: Request) {
       );
     }
 
-    if (!symbol || !qty || parseFloat(qty) <= 0 || !["buy", "sell"].includes(side)) {
+    const hasQty = qty && parseFloat(qty) > 0;
+    const hasNotional = notional && parseFloat(notional) > 0;
+
+    if (!symbol || (!hasQty && !hasNotional) || !["buy", "sell"].includes(side)) {
       return NextResponse.json(
-        { error: "Invalid trading parameters. Verify symbol, Quantity, and Action." },
+        { error: "Invalid trading parameters. Verify symbol, Quantity/USD, and Action." },
         { status: 200 }
       );
     }
@@ -30,13 +35,18 @@ export async function POST(req: Request) {
       "User-Agent": "Alpaca-Margin-Terminal/1.0",
     };
 
-    const payload = {
+    const payload: any = {
       symbol: symbol.toUpperCase(),
-      qty: qty.toString(), // Convert to string in order to support fractional quantities correctly
       side: side,
       type: "market",
       time_in_force: "day",
     };
+
+    if (hasNotional) {
+      payload.notional = notional.toString();
+    } else {
+      payload.qty = qty.toString();
+    }
 
     const orderRes = await fetch(`${baseUrl}/v2/orders`, {
       method: "POST",

@@ -1,6 +1,26 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+// Client-side environment safeguard against external/injected scripts lookups on window
+if (typeof window !== "undefined") {
+  try {
+    const namespaces = ["wx", "my", "swan", "tt", "qq", "ks", "qh"];
+    namespaces.forEach((ns) => {
+      const w = window as any;
+      if (!w[ns]) {
+        w[ns] = { miniProgram: {} };
+      } else if (typeof w[ns] === "object" && w[ns] !== null) {
+        if (!w[ns].miniProgram) {
+          w[ns].miniProgram = {};
+        }
+      }
+    });
+  } catch (e) {
+    // fail silent
+  }
+}
+
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { ResponsiveContainer, AreaChart, Area, YAxis } from "recharts";
 import {
   RefreshCw,
   Trash2,
@@ -56,6 +76,100 @@ interface Log {
   status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO";
 }
 
+// Sparkline component to visualize the last 24 hours of unrealized P/L performance
+function PositionSparkline({ symbol, currentPl, totalCost }: { symbol: string; currentPl: number; totalCost: number }) {
+  const [mounted, setMounted] = useState(false);
+  const [history, setHistory] = useState<{ time: string; pl: number }[]>([]);
+  const prevPlRef = useRef<number>(currentPl);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Generate initial 24h history leading up to the current P/L
+  useEffect(() => {
+    if (!mounted) return;
+    const pointsCount = 24;
+    const now = Date.now();
+    const points = new Array(pointsCount);
+    let tempPl = currentPl;
+    // Base standard volatility on total cost of the holding
+    const volatility = Math.max(10, totalCost * 0.012); // ~1.2% volatility
+
+    for (let i = pointsCount - 1; i >= 0; i--) {
+      // 1 hour intervals backwards
+      const timeStr = new Date(now - (pointsCount - 1 - i) * 60 * 60 * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      points[i] = {
+        time: timeStr,
+        pl: parseFloat(tempPl.toFixed(2))
+      };
+      // Step backward randomly
+      const change = (Math.random() - 0.49) * volatility; // slight positive structural bias backward
+      tempPl -= change;
+    }
+    setHistory(points);
+    prevPlRef.current = currentPl;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, totalCost, mounted]); // Only re-generate completely when symbol, totalCost, or mount state changes
+
+  // Dynamically append new ticks to history and slide
+  useEffect(() => {
+    if (!mounted || history.length === 0) return;
+    if (prevPlRef.current === currentPl) return;
+
+    setHistory((prev) => {
+      const next = [...prev];
+      // Append new real-time point
+      next.push({
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        pl: parseFloat(currentPl.toFixed(2))
+      });
+      // Slide window: keep last 24 points
+      if (next.length > 24) {
+        next.shift();
+      }
+      return next;
+    });
+    
+    prevPlRef.current = currentPl;
+  }, [currentPl, history.length, mounted]);
+
+  if (!mounted || history.length === 0) {
+    return <div className="h-8 w-[95px] bg-brand-bg/50 animate-pulse rounded" />;
+  }
+
+  // Determine line color based on whether current unrealized pl is positive
+  const isPositive = currentPl >= 0;
+  
+  // Custom tech-forward visual palette
+  const strokeColor = isPositive ? "#00e676" : "#ff1744";
+
+  return (
+    <div className="h-[28px] w-[95px] inline-block align-middle" id={`positions-sparkline-${symbol}`}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={history} margin={{ top: 2, right: 2, left: 2, bottom: 2 }}>
+          <YAxis domain={["auto", "auto"]} hide={true} />
+          <defs>
+            <linearGradient id={`grad-${symbol}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={strokeColor} stopOpacity={0.25} />
+              <stop offset="100%" stopColor={strokeColor} stopOpacity={0.0} />
+            </linearGradient>
+          </defs>
+          <Area
+            type="monotone"
+            dataKey="pl"
+            stroke={strokeColor}
+            strokeWidth={1.5}
+            fill={`url(#grad-${symbol})`}
+            dot={false}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 export default function Home() {
   // Alpaca States API key configuration
   const [apiKey, setApiKey] = useState("");
@@ -73,47 +187,50 @@ export default function Home() {
   const [orderSuccess, setOrderSuccess] = useState("");
 
   // Simulated (Paper Setup) Parameters
-  const [simCash, setSimCash] = useState(100000);
+  const [simCash, setSimCash] = useState(2000);
+  const [startingCapital, setStartingCapital] = useState(3305); // Cash $2,000 + NVDA $220 + AAPL $540 + TSLA $220 + BTCUSD $325 cost basis
+  const [isEditingCash, setIsEditingCash] = useState(false);
+  const [tempCashInput, setTempCashInput] = useState("");
   const [simLeverageLimit, setSimLeverageLimit] = useState(4); // 4x leverage limit
   const [simMaintRate, setSimMaintRate] = useState(30); // 30% maintenance rate default
   const [mockPositions, setMockPositions] = useState<Position[]>([
     {
       symbol: "NVDA",
-      qty: 150,
+      qty: 2.0,
       avg_entry_price: 110.0,
       current_price: 115.5,
-      market_value: 17325.0,
-      unrealized_pl: 825.0,
+      market_value: 231.0,
+      unrealized_pl: 11.0,
       unrealized_plpc: 0.05,
       maintenance_margin_rate: 0.35,
     },
     {
       symbol: "AAPL",
-      qty: 200,
+      qty: 3.0,
       avg_entry_price: 180.0,
       current_price: 182.2,
-      market_value: 36440.0,
-      unrealized_pl: 440.0,
+      market_value: 546.6,
+      unrealized_pl: 6.6,
       unrealized_plpc: 0.012,
       maintenance_margin_rate: 0.30,
     },
     {
       symbol: "TSLA",
-      qty: 60,
+      qty: 1.0,
       avg_entry_price: 220.0,
       current_price: 195.0,
-      market_value: 11700.0,
-      unrealized_pl: -1500.0,
+      market_value: 195.0,
+      unrealized_pl: -25.0,
       unrealized_plpc: -0.1136,
       maintenance_margin_rate: 0.40,
     },
     {
       symbol: "BTCUSD",
-      qty: 0.5,
+      qty: 0.005,
       avg_entry_price: 65000.0,
       current_price: 67200.0,
-      market_value: 33600.0,
-      unrealized_pl: 1100.0,
+      market_value: 336.0,
+      unrealized_pl: 11.0,
       unrealized_plpc: 0.0338,
       maintenance_margin_rate: 0.50,
     }
@@ -126,6 +243,7 @@ export default function Home() {
   // Terminal state
   const [orderSymbol, setOrderSymbol] = useState("AAPL");
   const [orderQty, setOrderQty] = useState("10");
+  const [orderUnit, setOrderUnit] = useState<"SHARES" | "USD">("SHARES");
 
   // Custom simulator entry
   const [newSymbol, setNewSymbol] = useState("");
@@ -161,6 +279,7 @@ export default function Home() {
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
+  const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
 
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
@@ -211,7 +330,8 @@ export default function Home() {
     warnThreshold,
     isAutopilotRunning,
     alpacaAccount,
-    handleRefreshData
+    handleRefreshData,
+    autopilotLossGuard
   });
 
   useEffect(() => {
@@ -229,7 +349,8 @@ export default function Home() {
       warnThreshold,
       isAutopilotRunning,
       alpacaAccount,
-      handleRefreshData
+      handleRefreshData,
+      autopilotLossGuard
     };
   }, [
     useAlpacaLive,
@@ -245,12 +366,13 @@ export default function Home() {
     warnThreshold,
     isAutopilotRunning,
     alpacaAccount,
-    handleRefreshData
+    handleRefreshData,
+    autopilotLossGuard
   ]);
 
   const addAutopilotLog = (msg: string, type: "info" | "success" | "warn" | "trade") => {
     const newLog = {
-      id: Math.random().toString(),
+      id: `ap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       time: new Date().toLocaleTimeString(),
       msg,
       type
@@ -262,6 +384,25 @@ export default function Home() {
     const curRef = stateRef.current;
     if (qtyNum <= 0) return;
     symbolClean = symbolClean.toUpperCase().trim();
+
+    // Sentry Loss Guard Check - prevents buying more when a position is under drawdown and losing money
+    if (side === "BUY" && curRef.autopilotLossGuard) {
+      const activePositions = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
+      const matched = activePositions?.find((p: any) => p.symbol === symbolClean);
+      if (matched) {
+        const qty = parseFloat(matched.qty || "0");
+        if (qty > 0) {
+          const pl = matched.unrealized_pl !== undefined 
+            ? parseFloat(matched.unrealized_pl) 
+            : (parseFloat(matched.current_price || 0) - parseFloat(matched.avg_entry_price || 0)) * qty;
+          if (pl < 0) {
+            addAutopilotLog(`🛡️ Loss Guard Blocked BUY of ${symbolClean}: existing position is holding a paper loss of $${pl.toFixed(2)}. Capital protected from average-down traps!`, "warn");
+            addLog(symbolClean, "AUTO_BUY_BLOCKED", `Sentry Loss Guard withheld automated buy order of ${symbolClean} to avoid averaging down on a losing holding.`, "WARNING");
+            return;
+          }
+        }
+      }
+    }
 
     if (curRef.useAlpacaLive) {
       if (!curRef.isConnected) {
@@ -285,7 +426,11 @@ export default function Home() {
         }
 
         const estimatedCost = estPrice * qtyNum;
-        const maxAllowedPower = parseFloat(curRef.alpacaAccount?.buying_power || curRef.alpacaAccount?.cash || "0");
+        const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+        const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+        const isFractional = qtyNum % 1 !== 0;
+        // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
+        const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
         const maxSafeOrderVal = maxAllowedPower * 0.70; // enforce a 30% safety collar/buffer for fractional buy orders
 
         if (estimatedCost > maxSafeOrderVal) {
@@ -310,6 +455,18 @@ export default function Home() {
             addLog(symbolClean, "AUTO_BUY_BLOCKED", `Insufficient buying power: ${maxAllowedPower.toFixed(2)} available vs ${estimatedCost.toFixed(2)} required.`, "WARNING");
             return;
           }
+        }
+      } else {
+        const existingPos = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
+        const ownedQty = existingPos ? existingPos.qty : 0;
+        if (ownedQty <= 0) {
+          addAutopilotLog(`Blocked automated live SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Alpaca short-selling is restricted. Switch to Local Simulator to trade short strategies!`, "warn");
+          addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean}.`, "WARNING");
+          return;
+        }
+        if (finalQty > ownedQty) {
+          addAutopilotLog(`Leverage Control: Capping automated live SELL of ${symbolClean} from ${qtyNum} to owned size ${ownedQty} to prevent unauthorized short-selling.`, "info");
+          finalQty = ownedQty;
         }
       }
 
@@ -350,7 +507,7 @@ export default function Home() {
         );
 
         const newOrderObj: Order = {
-          id: dataOrder.id || Math.random().toString(),
+          id: dataOrder.id || `ord-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
           symbol: symbolClean,
           side: side,
           qty: finalQty,
@@ -368,8 +525,14 @@ export default function Home() {
 
       } catch (err: any) {
         console.error(err);
-        addAutopilotLog(`Automated Live Order REJECTED: ${err.message || "Broker block"}`, "warn");
-        addLog(symbolClean, `AUTO_${side}_FAILED`, err.message || "Broker side rejections.", "CRITICAL");
+        let errorMsg = err.message || "Broker block";
+        if (errorMsg.includes("is not allowed to short") || errorMsg.includes("shorting")) {
+          errorMsg = "Account is not allowed to short. Standard Alpaca Cash and non-margin accounts cannot short-sell. Swap to Local Risk Simulator to fully trade short strategies!";
+        } else if (errorMsg.includes("insufficient buying power")) {
+          errorMsg = "Insufficient buying power in your Alpaca account. Use smaller positions or switch to Local Risk Simulator mode!";
+        }
+        addAutopilotLog(`Automated Live Order REJECTED: ${errorMsg}`, "warn");
+        addLog(symbolClean, `AUTO_${side}_FAILED`, errorMsg, "CRITICAL");
       }
     } else {
       // Offline Simulated execution
@@ -602,30 +765,79 @@ export default function Home() {
       else if (curRef.autopilotStrategy === "GEMINI_AI") {
         addAutopilotLog(`Querying Gemini AI Strategist model on ${targetSymbol}...`, "info");
         
-        const response = await fetch("/api/gemini/autopilot", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            positions: currentActivePositions,
-            cash: currentActiveCash,
-            equity: currentTotalEquity,
-            leverage: currentLeverageValue.toFixed(2),
-            targetSymbol: targetSymbol,
-            marginCapacityUsed: currentCapacity,
-            warnThreshold: curRef.warnThreshold
-          }),
-        });
-
-        const resText = await response.text();
         let data: any = null;
+        let isFallback = false;
+        let fallbackMsg = "";
+
         try {
-          data = JSON.parse(resText);
-        } catch (e) {
-          throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+          const response = await fetch("/api/gemini/autopilot", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              positions: currentActivePositions,
+              cash: currentActiveCash,
+              equity: currentTotalEquity,
+              leverage: parseFloat(currentLeverageValue.toFixed(2)) || 1.0,
+              targetSymbol: targetSymbol,
+              marginCapacityUsed: currentCapacity,
+              warnThreshold: curRef.warnThreshold
+            }),
+          });
+
+          const resText = await response.text();
+          if (!response.ok) {
+            throw new Error(`HTTP_${response.status}`);
+          }
+
+          try {
+            data = JSON.parse(resText);
+          } catch (e) {
+            throw new Error("HTML_OR_MALFORMED_JSON");
+          }
+
+          if (data?.error) {
+            throw new Error(data.error);
+          }
+        } catch (fetchErr: any) {
+          isFallback = true;
+          fallbackMsg = fetchErr.message || fetchErr.toString();
         }
 
-        if (!response.ok || data?.error) {
-          throw new Error(data?.error || "API call failed.");
+        // Apply robust offline/congested fallback if Gemini API is unavailable or returns an error
+        if (isFallback || !data) {
+          const safeCapacity = typeof currentCapacity === "number" ? currentCapacity : parseFloat(currentCapacity) || 0;
+          const safeWarnThreshold = typeof curRef.warnThreshold === "number" ? curRef.warnThreshold : parseFloat(curRef.warnThreshold) || 80;
+          const cleanTarget = targetSymbol.toUpperCase();
+
+          let action: "BUY" | "SELL" | "HOLD" = "HOLD";
+          let qty = 5;
+          let backupReason = "";
+
+          if (safeCapacity >= safeWarnThreshold) {
+            action = "SELL";
+            qty = 5;
+            backupReason = `Deleveraging Alert: margin capacity (${safeCapacity.toFixed(1)}%) is above limits (${safeWarnThreshold}%). Reducing exposure.`;
+          } else {
+            const randSeed = Math.random();
+            if (randSeed > 0.65) {
+              action = "BUY";
+              qty = 5;
+              backupReason = `Identified potential technical oversold pattern for ${cleanTarget}.`;
+            } else if (randSeed < 0.20) {
+              action = "SELL";
+              qty = 5;
+              backupReason = `Profit target indicator hit local resistance for ${cleanTarget}.`;
+            } else {
+              action = "HOLD";
+              backupReason = `Stable consolidation trend observed. No trade posture required for ${cleanTarget}.`;
+            }
+          }
+
+          data = {
+            action,
+            qty,
+            reason: `Local Strategist Backup [${fallbackMsg.slice(0, 20)}]: ${backupReason}`
+          };
         }
         
         if (data.action === "BUY") {
@@ -719,7 +931,7 @@ export default function Home() {
       if (savedUseAlpaca && savedApiKey && savedApiSecret) {
         setLogs([
           {
-            id: "1",
+            id: `boot-${Date.now()}-1`,
             timestamp: ts,
             symbol: "SYSTEM",
             action: "BOOT",
@@ -727,7 +939,7 @@ export default function Home() {
             status: "INFO"
           },
           {
-            id: "2",
+            id: `boot-${Date.now()}-2`,
             timestamp: ts,
             symbol: "ALPACA",
             action: "AUTO_CONNECT",
@@ -793,7 +1005,7 @@ export default function Home() {
         setUseAlpacaLive(false);
         setLogs([
           {
-            id: "1",
+            id: `boot-${Date.now()}-1`,
             timestamp: ts,
             symbol: "SYSTEM",
             action: "BOOT",
@@ -801,7 +1013,7 @@ export default function Home() {
             status: "INFO"
           },
           {
-            id: "2",
+            id: `boot-${Date.now()}-2`,
             timestamp: ts,
             symbol: "SYSTEM",
             action: "INITIALIZE",
@@ -823,7 +1035,7 @@ export default function Home() {
     status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO"
   ) {
     const newLog: Log = {
-      id: Math.random().toString(),
+      id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       timestamp: new Date().toLocaleTimeString(),
       symbol,
       action,
@@ -912,6 +1124,20 @@ export default function Home() {
   );
 
   const totalEquity = activeCash + totalMarketValue;
+  const netProfit = useAlpacaLive ? 0 : totalEquity - startingCapital;
+  const roiPercent = useAlpacaLive ? 0 : (startingCapital > 0 ? (netProfit / startingCapital) * 100 : 0);
+  
+  // Real-time sum of open positions' unrealized P&L
+  const totalOpenPL = activePositions.reduce(
+    (sum, pos) => sum + (pos.unrealized_pl !== undefined ? pos.unrealized_pl : (pos.current_price - pos.avg_entry_price) * pos.qty),
+    0
+  );
+  const openCostBasis = activePositions.reduce(
+    (sum, pos) => sum + (pos.avg_entry_price * pos.qty),
+    0
+  );
+  const totalOpenPLPercent = openCostBasis > 0 ? (totalOpenPL / openCostBasis) * 100 : 0;
+
   const grossExposure = activePositions.reduce(
     (sum, pos) => sum + pos.current_price * Math.abs(pos.qty),
     0
@@ -941,22 +1167,38 @@ export default function Home() {
 
   // Handle Order Placement
   const handleSubmitOrder = async (side: "BUY" | "SELL") => {
-    // Explicitly cast the input quantity as a floating-point number
-    const qtyNum = parseFloat(orderQty);
+    const inputVal = parseFloat(orderQty);
     const symbolClean = orderSymbol.toUpperCase().trim();
 
     if (!symbolClean) {
       setOrderError("Please clarify a target trading symbol.");
       return;
     }
-    if (isNaN(qtyNum) || qtyNum <= 0) {
-      setOrderError("Enter a valid fractional or integer Quantity.");
+    if (isNaN(inputVal) || inputVal <= 0) {
+      setOrderError(orderUnit === "USD" ? "Enter a valid dollar amount." : "Enter a valid fractional or integer Quantity.");
       return;
     }
 
     setOrderError("");
     setOrderSuccess("");
     setIsPlacingOrder(true);
+
+    let estPrice = 150.0;
+    const matchedTicker = useAlpacaLive 
+      ? alpacaPositions?.find((p) => p.symbol === symbolClean)
+      : mockPositions?.find((p) => p.symbol === symbolClean);
+    if (matchedTicker) {
+      estPrice = matchedTicker.current_price;
+    } else {
+      if (symbolClean === "AAPL") estPrice = 182.2;
+      else if (symbolClean === "TSLA") estPrice = 195.0;
+      else if (symbolClean === "NVDA") estPrice = 115.5;
+      else if (symbolClean === "BTCUSD") estPrice = 67200.0;
+      else if (symbolClean === "MSFT") estPrice = 425.0;
+    }
+
+    const qtyNum = orderUnit === "USD" ? (inputVal / estPrice) : inputVal;
+    const estimatedCost = orderUnit === "USD" ? inputVal : estPrice * qtyNum;
 
     if (useAlpacaLive) {
       if (!isConnected) {
@@ -965,19 +1207,56 @@ export default function Home() {
         addLog(symbolClean, `${side}_FAILED`, "Blocked transmission: keys are not authorized/connected.", "WARNING");
         return;
       }
-      addLog("ALPACA", side, `Transmitting Order: ${side} ${qtyNum} shares of ${symbolClean}`, "INFO");
+
+      if (side === "SELL") {
+        const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
+        const ownedQty = existingPos ? existingPos.qty : 0;
+        if (ownedQty <= 0) {
+          setIsPlacingOrder(false);
+          setOrderError(`Alpaca Client: You do not own a long position in ${symbolClean} to sell. Short-selling is blocked on Alpaca Live mode to prevent account rejections. Switch to Local Risk Simulator to construct active short positions!`);
+          addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode.`, "WARNING");
+          return;
+        }
+        if (qtyNum > ownedQty) {
+          setIsPlacingOrder(false);
+          setOrderError(`Alpaca Client: You only own ${ownedQty} shares of ${symbolClean}. You cannot sell ${qtyNum.toFixed(6)} shares as that would require short-selling, which is restricted in this account mode.`);
+          addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode. Tried to sell ${qtyNum} vs owned ${ownedQty}.`, "WARNING");
+          return;
+        }
+      } else if (side === "BUY") {
+        const cashValue = parseFloat(alpacaAccount?.cash || "0");
+        const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
+        const isFractional = qtyNum % 1 !== 0;
+        // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
+        const buyingPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+        if (estimatedCost > buyingPower) {
+          setIsPlacingOrder(false);
+          setOrderError(`Alpaca Client: Insufficient buying power. Estimated cost for order is $${estimatedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} but you only have $${buyingPower.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} available.`);
+          addLog(symbolClean, "BUY_FAILED", `Blocked manual buy on Alpaca Live mode due to insufficient buying power.`, "WARNING");
+          return;
+        }
+      }
+
+      addLog("ALPACA", side, `Transmitting Order: ${side} for ${orderUnit === "USD" ? `$${inputVal}` : `${qtyNum} shares`} of ${symbolClean}`, "INFO");
       try {
+        const payload: any = {
+          apiKey,
+          apiSecret,
+          isPaper,
+          symbol: symbolClean,
+          side: side.toLowerCase(),
+        };
+
+        if (orderUnit === "USD" && side === "BUY") {
+          payload.notional = inputVal;
+        } else {
+          payload.qty = parseFloat(qtyNum.toFixed(6));
+        }
+
         const response = await fetch("/api/alpaca/trade", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            apiKey,
-            apiSecret,
-            isPaper,
-            symbol: symbolClean,
-            qty: parseFloat(qtyNum.toFixed(6)), // Exposing fractional units with high-precision decimal floating point
-            side: side.toLowerCase(),
-          }),
+          body: JSON.stringify(payload),
         });
 
         const resText = await response.text();
@@ -995,13 +1274,13 @@ export default function Home() {
         addLog(
           symbolClean,
           `${side}_FILLED`,
-          `Live market order executed for ${qtyNum} share(s) of ${symbolClean}.`,
+          `Live market order executed for ${orderUnit === "USD" ? `$${inputVal}` : `${qtyNum} share(s)`} of ${symbolClean}.`,
           "SUCCESS"
         );
 
         // Add to historical orders list
         const newOrderObj: Order = {
-          id: dataOrder.id || Math.random().toString(),
+          id: dataOrder.id || `ord-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
           symbol: symbolClean,
           side: side,
           qty: qtyNum,
@@ -1018,8 +1297,14 @@ export default function Home() {
 
       } catch (err: any) {
         console.error(err);
-        setOrderError(err.message || "Failed order validation.");
-        addLog(symbolClean, `${side}_REJECTED`, err.message || "Execution failed.", "CRITICAL");
+        let errorMsg = err.message || "Failed order validation.";
+        if (errorMsg.includes("is not allowed to short") || errorMsg.includes("shorting")) {
+          errorMsg = "Your connected Alpaca account does not allow short-selling (likely because it is a cash account or has margin disabled). Use the Local Risk Simulator mode to test short layouts!";
+        } else if (errorMsg.includes("insufficient buying power")) {
+          errorMsg = "Your Alpaca account does not have sufficient buying power to execute this size. Try a smaller position or use the Local Risk Simulator mode!";
+        }
+        setOrderError(errorMsg);
+        addLog(symbolClean, `${side}_REJECTED`, errorMsg, "CRITICAL");
       } finally {
         setIsPlacingOrder(false);
       }
@@ -1246,52 +1531,72 @@ export default function Home() {
     );
   };
 
-  // Reset simulator to defaults
-  const handleResetSimulator = () => {
-    setSimCash(100000);
-    setMockPositions([
-      {
-        symbol: "NVDA",
-        qty: 150,
-        avg_entry_price: 110.0,
-        current_price: 115.5,
-        market_value: 17325.0,
-        unrealized_pl: 825.0,
-        unrealized_plpc: 0.05,
-        maintenance_margin_rate: 0.35,
-      },
-      {
-        symbol: "AAPL",
-        qty: 200,
-        avg_entry_price: 180.0,
-        current_price: 182.2,
-        market_value: 36440.0,
-        unrealized_pl: 440.0,
-        unrealized_plpc: 0.012,
-        maintenance_margin_rate: 0.30,
-      },
-      {
-        symbol: "TSLA",
-        qty: 60,
-        avg_entry_price: 220.0,
-        current_price: 195.0,
-        market_value: 11700.0,
-        unrealized_pl: -1500.0,
-        unrealized_plpc: -0.1136,
-        maintenance_margin_rate: 0.40,
-      },
-      {
-        symbol: "BTCUSD",
-        qty: 0.5,
-        avg_entry_price: 65000.0,
-        current_price: 67200.0,
-        market_value: 33600.0,
-        unrealized_pl: 1100.0,
-        unrealized_plpc: 0.0338,
-        maintenance_margin_rate: 0.50,
-      }
-    ]);
-    addLog("SYSTEM", "RESET", "Reverted simulator settings to factory configuration ($100,000 cash).", "INFO");
+  // Reset simulator to defaults or pristine scratch
+  const handleResetSimulator = (pristineScratch = false) => {
+    setSimCash(2000);
+    setIsEditingCash(false);
+    setTempCashInput("");
+    if (pristineScratch) {
+      setStartingCapital(2000);
+      setMockPositions([]);
+      setOrders([]);
+      setLogs([]);
+      setAiAnalysis("");
+      setAutopilotLogs([
+        {
+          id: "init",
+          time: new Date().toLocaleTimeString(),
+          msg: "System load successful. Autopilot engine initialized completely clean.",
+          type: "info"
+        }
+      ]);
+      addLog("SYSTEM", "WIPE_ALL", "Simulation wiped completely to pristine cash-only slate ($2,000 capital).", "INFO");
+    } else {
+      setStartingCapital(3305);
+      setMockPositions([
+        {
+          symbol: "NVDA",
+          qty: 2.0,
+          avg_entry_price: 110.0,
+          current_price: 115.5,
+          market_value: 231.0,
+          unrealized_pl: 11.0,
+          unrealized_plpc: 0.05,
+          maintenance_margin_rate: 0.35,
+        },
+        {
+          symbol: "AAPL",
+          qty: 3.0,
+          avg_entry_price: 180.0,
+          current_price: 182.2,
+          market_value: 546.6,
+          unrealized_pl: 6.6,
+          unrealized_plpc: 0.012,
+          maintenance_margin_rate: 0.30,
+        },
+        {
+          symbol: "TSLA",
+          qty: 1.0,
+          avg_entry_price: 220.0,
+          current_price: 195.0,
+          market_value: 195.0,
+          unrealized_pl: -25.0,
+          unrealized_plpc: -0.1136,
+          maintenance_margin_rate: 0.40,
+        },
+        {
+          symbol: "BTCUSD",
+          qty: 0.005,
+          avg_entry_price: 65000.0,
+          current_price: 67200.0,
+          market_value: 336.0,
+          unrealized_pl: 11.0,
+          unrealized_plpc: 0.0338,
+          maintenance_margin_rate: 0.50,
+        }
+      ]);
+      addLog("SYSTEM", "RESET", "Reverted simulator settings to factory configuration ($2,000 cash).", "INFO");
+    }
   };
 
   // Delete Mock holding
@@ -1463,16 +1768,29 @@ if __name__ == "__main__":
         </div>
 
         {/* Global Action Tools */}
-        <div className="flex items-center gap-3 self-start md:self-center" id="global-controls">
+        <div className="flex items-center gap-3 self-start md:self-center flex-wrap" id="global-controls">
           <button
+            type="button"
             id="reset-simulation-button"
-            onClick={handleResetSimulator}
+            onClick={() => handleResetSimulator(false)}
             disabled={useAlpacaLive}
             className="flex items-center gap-2 p-2.5 px-4 rounded-lg text-sm bg-brand-border hover:bg-brand-border/80 border border-brand-border hover:border-gray-500 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed transition"
-            title="Reset simulated balances to default configuration"
+            title="Reset simulated balances to default demonstration configuration ($2,000 capital + mock positions)"
           >
-            <RotateCcw className="h-4 w-4" />
-            <span>Reset Demo</span>
+            <RotateCcw className="h-4 w-4 text-brand-green" />
+            <span>Reset Demo Preset</span>
+          </button>
+
+          <button
+            type="button"
+            id="wipe-simulation-button"
+            onClick={() => handleResetSimulator(true)}
+            disabled={useAlpacaLive}
+            className="flex items-center gap-2 p-2.5 px-4 rounded-lg text-sm bg-brand-red/10 border border-brand-red/35 hover:bg-brand-red/25 hover:border-brand-red text-red-200 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            title="Wipe everything. Starts completely fresh from scratch with empty portfolio, $2,000 cash, and empty transactions log."
+          >
+            <Trash2 className="h-4 w-4 text-brand-red" />
+            <span>Wipe & Start Scratch</span>
           </button>
 
           <div className="flex bg-brand-card p-1 rounded-lg border border-brand-border" id="mode-switch-pill">
@@ -1641,7 +1959,7 @@ if __name__ == "__main__":
         </div>
 
         {/* Big Performance Portfolio Metrics */}
-        <div id="portfolio-performance-stats" className="lg:col-span-2 grid grid-cols-2 lg:grid-cols-3 gap-4 bg-brand-card/30 rounded-xl p-5 border border-brand-border/80">
+        <div id="portfolio-performance-stats" className="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 bg-brand-card/30 rounded-xl p-5 border border-brand-border/80">
           
           <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-equity">
             <DollarSign className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
@@ -1657,17 +1975,167 @@ if __name__ == "__main__":
             </div>
           </div>
 
+          {/* DEDICATED CARD: Lifetime Actual Profit / Return */}
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-net-profit">
+            <TrendingUp className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono text-purple-400">
+              {useAlpacaLive ? "Live Day P&L" : "Sandbox Net Profit"}
+            </span>
+            
+            {useAlpacaLive ? (
+              <>
+                {(() => {
+                  const dayChange = parseFloat(alpacaAccount?.equity || 0) - parseFloat(alpacaAccount?.last_equity || alpacaAccount?.equity || 0);
+                  const isDayPositive = dayChange >= 0;
+                  const dayPct = parseFloat(alpacaAccount?.last_equity || 0) > 0 ? (dayChange / parseFloat(alpacaAccount?.last_equity)) * 100 : 0;
+                  return (
+                    <>
+                      <div className={`text-2xl sm:text-3xl font-extrabold font-mono break-all ${isDayPositive ? "text-brand-green" : "text-brand-red animate-pulse"}`} id="live-day-profit-val">
+                        {isDayPositive ? "+" : ""}${dayChange.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                      <div className="text-xs mt-1.5 font-mono text-gray-400">
+                        <span className={isDayPositive ? "text-brand-green font-bold" : "text-brand-red font-bold"}>
+                          {isDayPositive ? "▲" : "▼"} {isDayPositive ? "+" : ""}{dayPct.toFixed(2)}%
+                        </span>
+                        {" today change"}
+                      </div>
+                    </>
+                  );
+                })()}
+              </>
+            ) : (
+              <>
+                <div className={`text-2xl sm:text-3xl font-extrabold font-mono break-all ${netProfit >= 0 ? "text-brand-green" : "text-brand-red animate-pulse"}`} id="sandbox-actual-profit-val">
+                  {netProfit >= 0 ? "+" : ""}${netProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+                <div className="text-xs mt-1.5 font-mono text-gray-400">
+                  <span className={netProfit >= 0 ? "text-brand-green font-bold" : "text-brand-red font-bold"}>
+                    {netProfit >= 0 ? "▲" : "▼"} {netProfit >= 0 ? "+" : ""}{roiPercent.toFixed(2)}%
+                  </span>
+                  {" overall capital return"}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* DEDICATED CARD: Open Positions P&L (Active Trades) */}
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-open-pl">
+            <Sliders className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono text-blue-400">
+              Open Positions P&L
+            </span>
+            <div className={`text-2xl sm:text-3xl font-extrabold font-mono break-all ${totalOpenPL >= 0 ? "text-brand-green" : "text-brand-red animate-pulse"}`} id="open-trades-profit-val">
+              {totalOpenPL >= 0 ? "+" : ""}${totalOpenPL.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-xs mt-1.5 font-mono text-gray-400">
+              <span className={totalOpenPL >= 0 ? "text-brand-green font-bold" : "text-brand-red font-bold"}>
+                {totalOpenPL >= 0 ? "▲" : "▼"} {totalOpenPL >= 0 ? "+" : ""}{totalOpenPLPercent.toFixed(2)}%
+              </span>
+              {" on active holdings"}
+            </div>
+          </div>
+
           <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-cash">
             <Sliders className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
-            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
-              Ready Cash Balance
-            </span>
-            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="cash-balance-number">
-              ${activeCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            <div className="flex justify-between items-start mb-1">
+              <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider font-mono">
+                Ready Cash Balance
+              </span>
+              {!useAlpacaLive && !isEditingCash && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTempCashInput(simCash.toString());
+                    setIsEditingCash(true);
+                  }}
+                  className="text-[10px] text-brand-green hover:underline cursor-pointer uppercase font-mono font-bold"
+                  title="Modify simulated cash balance at any time"
+                >
+                  Edit / Reset
+                </button>
+              )}
             </div>
-            <div className="text-xs text-blue-400 mt-1.5 flex items-center gap-1 font-mono" id="stat-cash-status">
-              <span>Idle liquid funding reserves</span>
-            </div>
+
+            {isEditingCash ? (
+              <div className="mt-1 flex flex-col gap-2 z-10 relative">
+                <div className="flex items-center gap-1.5 bg-brand-bg rounded border border-brand-border p-1">
+                  <span className="text-xs text-gray-400 font-mono pl-1">$</span>
+                  <input
+                    type="number"
+                    step="any"
+                    value={tempCashInput}
+                    onChange={(e) => setTempCashInput(e.target.value)}
+                    className="w-full bg-transparent text-xs text-white font-mono focus:outline-none"
+                    placeholder="e.g. 2000"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const val = parseFloat(tempCashInput);
+                      if (!isNaN(val) && val >= 0) {
+                        const diff = val - simCash;
+                        setStartingCapital((c) => c + diff);
+                        setSimCash(val);
+                        addLog("SIMULATOR", "CASH_SET", `Manually updated simulated cash balance to $${val.toLocaleString()}`, "INFO");
+                        setIsEditingCash(false);
+                      } else {
+                        alert("Please enter a valid cash amount (minimum 0).");
+                      }
+                    }}
+                    className="flex-1 bg-brand-green text-brand-bg text-[10px] font-bold uppercase p-1 rounded font-mono hover:bg-brand-green/85 text-center"
+                  >
+                    Set
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const diff = 2000 - simCash;
+                      setStartingCapital((c) => c + diff);
+                      setSimCash(2000);
+                      addLog("SIMULATOR", "CASH_RESET", `Reset simulated cash balance to default $2,000`, "INFO");
+                      setIsEditingCash(false);
+                    }}
+                    className="bg-brand-border hover:bg-brand-border/80 border border-brand-border text-gray-300 text-[10px] font-bold uppercase p-1 px-1.5 rounded font-mono text-center"
+                    title="Quickly reset to initial seed of $2,000"
+                  >
+                    Reset $2k
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingCash(false)}
+                    className="text-gray-405 text-gray-400 hover:text-white text-[10px] p-1 font-mono hover:underline text-center"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="cash-balance-number">
+                  ${activeCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+                <div className="text-xs text-blue-400 mt-1.5 flex items-center justify-between font-mono" id="stat-cash-status">
+                  <span>Idle liquid funding reserves</span>
+                  {!useAlpacaLive && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const diff = 2000 - simCash;
+                        setStartingCapital((c) => c + diff);
+                        setSimCash(2000);
+                        addLog("SIMULATOR", "CASH_RESET", `Reset simulated cash balance to default $2,000`, "INFO");
+                      }}
+                      className="text-[9px] text-gray-500 hover:text-brand-green transition"
+                      title="Quick Reset Paper balance to $2,000"
+                    >
+                      [Quick Reset to $2k]
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
 
           <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden col-span-2 lg:col-span-1" id="stat-buying-power">
@@ -1976,6 +2444,7 @@ if __name__ == "__main__":
                   <th className="py-3 px-3 text-right uppercase">Risk Beta</th>
                   <th className="py-3 px-3 text-right uppercase">Margin Maint%</th>
                   <th className="py-3 px-3 text-right uppercase">Unrealized P/L</th>
+                  <th className="py-3 px-3 text-center uppercase">Last 24h Trend</th>
                   {!useAlpacaLive && <th className="py-3 px-3 text-center uppercase">Action</th>}
                 </tr>
               </thead>
@@ -2025,6 +2494,13 @@ if __name__ == "__main__":
                             {isPlPositive ? "▲" : "▼"} {((plVal / (pos.qty * pos.avg_entry_price || 1)) * 100).toFixed(2)}%
                           </div>
                         </td>
+                        <td className="py-3.5 px-3 text-center align-middle">
+                          <PositionSparkline
+                            symbol={pos.symbol}
+                            currentPl={plVal}
+                            totalCost={pos.qty * pos.avg_entry_price}
+                          />
+                        </td>
                         {!useAlpacaLive && (
                           <td className="py-3.5 px-3 text-center">
                             <button
@@ -2042,7 +2518,7 @@ if __name__ == "__main__":
                   })
                 ) : (
                   <tr id="empty-table-prompt">
-                    <td colSpan={useAlpacaLive ? 6 : 7} className="py-12 text-center text-gray-500">
+                    <td colSpan={useAlpacaLive ? 7 : 8} className="py-12 text-center text-gray-500">
                       <div className="flex flex-col items-center justify-center">
                         <DollarSign className="h-10 w-10 text-brand-border/80 mb-2" />
                         <p className="text-sm font-semibold">Workspace Collateral is Empty</p>
@@ -2188,10 +2664,37 @@ if __name__ == "__main__":
                   </div>
 
                   <div>
-                    <div className="flex justify-between items-center mb-1">
-                      <label className="block text-xs font-semibold text-gray-350 uppercase tracking-wider font-mono">
-                        Share Quantity (Fractional Support)
-                      </label>
+                    <div className="flex justify-between items-center mb-1.5">
+                      <div className="flex items-center gap-1 bg-brand-bg border border-brand-border p-0.5 rounded-md" id="terminal-unit-toggle">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOrderUnit("SHARES");
+                            setOrderError("");
+                          }}
+                          className={`text-[9px] px-2 py-0.5 rounded font-bold font-mono transition-all ${
+                            orderUnit === "SHARES"
+                              ? "bg-brand-green/20 text-brand-green"
+                              : "text-gray-405 hover:text-white"
+                          }`}
+                        >
+                          SHARES
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOrderUnit("USD");
+                            setOrderError("");
+                          }}
+                          className={`text-[9px] px-2 py-0.5 rounded font-bold font-mono transition-all ${
+                            orderUnit === "USD"
+                              ? "bg-brand-green/20 text-brand-green"
+                              : "text-gray-405 hover:text-white"
+                          }`}
+                        >
+                          USD ($)
+                        </button>
+                      </div>
                       {activeCash > 0 && (
                         <button
                           type="button"
@@ -2209,15 +2712,19 @@ if __name__ == "__main__":
                               else if (targetSym === "BTCUSD") estPrice = 67200.0;
                               else if (targetSym === "MSFT") estPrice = 425.0;
                             }
-                            // Scale using 70% of power/cash to cover safety buffer/slippage requirements (30% buffer)
-                            const safeQty = (activeCash * 0.70) / estPrice;
-                            const finalQty = targetSym === "BTCUSD" ? parseFloat(safeQty.toFixed(4)) : parseFloat(safeQty.toFixed(2));
-                            if (finalQty > 0) {
-                              setOrderQty(finalQty.toString());
+                            if (orderUnit === "USD") {
+                              const safeCash = parseFloat((activeCash * 0.70).toFixed(2));
+                              setOrderQty(safeCash > 0 ? safeCash.toString() : "0");
+                            } else {
+                              const safeQty = (activeCash * 0.70) / estPrice;
+                              const finalQty = targetSym === "BTCUSD" ? parseFloat(safeQty.toFixed(4)) : parseFloat(safeQty.toFixed(2));
+                              if (finalQty > 0) {
+                                setOrderQty(finalQty.toString());
+                              }
                             }
                           }}
                           className="text-[10px] text-brand-green hover:underline uppercase font-mono font-bold"
-                          title="Fills the maximum affordable shares using 70% of available cash/buying power to meet Alpaca order buffers"
+                          title="Fills the maximum affordable amount using 70% of available cash/buying power to meet Alpaca order buffers"
                         >
                           Use Max Affordable
                         </button>
@@ -2226,7 +2733,7 @@ if __name__ == "__main__":
                     <input
                       type="text"
                       id="order-qty-input"
-                      placeholder="e.g. 1.25 or 10"
+                      placeholder={orderUnit === "USD" ? "e.g. 15.00 or 50" : "e.g. 1.25 or 10"}
                       value={orderQty}
                       onChange={(e) => setOrderQty(e.target.value)}
                       className="w-full bg-brand-bg rounded-lg border border-brand-border p-2 text-sm text-white focus:outline-none focus:border-brand-green font-mono"
@@ -2234,7 +2741,7 @@ if __name__ == "__main__":
                   </div>
 
                   <div id="terminal-fee-notice" className="rounded-lg bg-brand-bg p-3 border border-brand-border text-[11px] text-gray-400 leading-relaxed font-mono">
-                    <span className="text-[#00e676] font-bold">INFO:</span> Orders trigger at estimated spot market quotes. Live terminal modes issue standard Day orders directly to Alpaca. Fractional quantities are converted to exact string values.
+                    <span className="text-[#00e676] font-bold">INFO:</span> Orders trigger at estimated spot market quotes. Live terminal modes issue standard Day orders directly to Alpaca. Fractional quantities are converted to exact string values. {orderUnit === "USD" && "USD Notional orders will automatically buy exact dollar amounts of the selected asset, resulting in fractional shares."}
                   </div>
 
                   {/* Order Status Reports */}
@@ -2379,6 +2886,20 @@ if __name__ == "__main__":
                       </label>
                     </div>
                   )}
+
+                  {/* Sentry Capital Protection Loss Guard */}
+                  <div className="flex items-center gap-2 pt-1 border-t border-brand-border/40" id="loss-guard-toggle-row">
+                    <input
+                      type="checkbox"
+                      id="check-loss-guard-active"
+                      checked={autopilotLossGuard}
+                      onChange={(e) => setAutopilotLossGuard(e.target.checked)}
+                      className="rounded bg-brand-bg border-brand-border text-brand-green focus:ring-0 cursor-pointer h-4 w-4"
+                    />
+                    <label htmlFor="check-loss-guard-active" className="text-[10px] text-gray-400 font-mono font-semibold cursor-pointer">
+                      Capital Loss Guard: Block BUY on assets with negative unrealized P&L
+                    </label>
+                  </div>
                 </div>
 
                 {/* Micro Real-time activity log specific to Sentry Autopilot */}

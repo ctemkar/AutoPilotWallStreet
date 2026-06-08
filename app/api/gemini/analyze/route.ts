@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 
+export const dynamic = "force-dynamic";
+
 const apiKey = process.env.GEMINI_API_KEY;
 
 // Shared mechanical fallback generator
