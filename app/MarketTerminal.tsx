@@ -401,7 +401,7 @@ export default function MarketTerminal() {
     } catch (e) {
       // ignore
     }
-  }, []);
+  }, [addAutopilotLog, addLog]);
 
   // Persist TP/SL whenever they change
   useEffect(() => {
