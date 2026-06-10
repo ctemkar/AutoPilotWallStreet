@@ -596,6 +596,14 @@ export default function MarketTerminal() {
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
   const autopilotTargetSymbolIndexRef = useRef(0);
+  const LIQUIDATION_COOLDOWN_MS = 5 * 60 * 1000;
+
+  const armLiquidationCooldown = useCallback((symbol: string, source: string) => {
+    const symbolClean = symbol.toUpperCase().trim();
+    if (!symbolClean) return;
+    autopilotBuyCooldownUntilRef.current[symbolClean] = Date.now() + LIQUIDATION_COOLDOWN_MS;
+    addAutopilotLog(`Liquidation cooldown armed for ${symbolClean}: buy re-entry paused for ${Math.floor(LIQUIDATION_COOLDOWN_MS / 1000)}s (${source}).`, "info");
+  }, [LIQUIDATION_COOLDOWN_MS, addAutopilotLog]);
 
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
@@ -791,10 +799,17 @@ export default function MarketTerminal() {
           side,
           requestedQty: qtyNum,
           executedQty: 0,
-          message: `BUY cooldown active for ${symbolClean} (${secLeft}s remaining) after prior buying-power rejection.`
+          message: `BUY cooldown active for ${symbolClean} (${secLeft}s remaining).`
         };
       }
     }
+
+    const activePositionsForCloseCheck = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
+    const existingPositionBeforeOrder = activePositionsForCloseCheck.find((p: any) => p.symbol === symbolClean);
+    const isFullCloseAttempt = !!existingPositionBeforeOrder && (
+      (existingPositionBeforeOrder.qty > 0 && side === "SELL" && qtyNum >= existingPositionBeforeOrder.qty) ||
+      (existingPositionBeforeOrder.qty < 0 && side === "BUY" && qtyNum >= Math.abs(existingPositionBeforeOrder.qty))
+    );
 
     // Automated Blacklist Intercept Check (e.g. to avoid trading low-winrate or banned symbols like TSLA in Autopilot entirely)
     if (curRef.autopilotBlacklist?.includes(symbolClean)) {
@@ -1161,6 +1176,10 @@ export default function MarketTerminal() {
           addLog(symbolClean, `${side}_ACCEPTED`, `Live automated order accepted by broker (status: ${brokerStatus}, path: ${routeDescriptor}).`, "INFO");
         }
 
+        if (isFullCloseAttempt && (isFilledStatus || brokerStatus === "ACCEPTED" || brokerStatus === "NEW" || brokerStatus === "PARTIALLY_FILLED")) {
+          armLiquidationCooldown(symbolClean, "auto-close order");
+        }
+
         const newOrderObj: Order = {
           id: dataOrder.id || `ord-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
           symbol: symbolClean,
@@ -1421,6 +1440,10 @@ export default function MarketTerminal() {
         addLog(symbolClean, "AUTO_SELL_SIM", `Sold simulated ${qtyNum} shares of ${symbolClean} with net credit (Fees & taxes: ${currencySymbol}${orderFees.toFixed(2)})`, "SUCCESS");
       }
 
+      if (isFullCloseAttempt) {
+        armLiquidationCooldown(symbolClean, "simulated close order");
+      }
+
       setOrders((prev) => [
         {
           id: `sim-auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -1444,7 +1467,7 @@ export default function MarketTerminal() {
         message: "Simulated order filled."
       };
     }
-  }, [addAutopilotLog, addLog]);
+  }, [addAutopilotLog, addLog, armLiquidationCooldown]);
 
   const logScanOrderOutcome = useCallback((source: string, outcome: AutopilotOrderResult) => {
     setLastAutopilotOrderOutcome(outcome);
@@ -3501,6 +3524,7 @@ export default function MarketTerminal() {
           }
           
           addLog(symbolClean, "LIQUIDATED", `Position fully liquidated! Sold ${existingPos.qty} shares.`, "SUCCESS");
+          armLiquidationCooldown(symbolClean, "manual position liquidation");
           
           // Append to manual order records
           const newOrderObj: Order = {
@@ -3538,6 +3562,7 @@ export default function MarketTerminal() {
           }
           
           addLog(symbolClean, "LIQUIDATED", `Direct position liquidation successful! Broker order queued.`, "SUCCESS");
+          armLiquidationCooldown(symbolClean, "manual position liquidation");
           
           setTimeout(() => {
             handleRefreshData();
@@ -3583,6 +3608,7 @@ export default function MarketTerminal() {
           `Simulator closed ${symbolClean} position of ${pos.qty} shares for net of $${Math.abs(netProceeds).toFixed(2)} (Fees: $${orderFees.toFixed(2)}).`,
           "SUCCESS"
         );
+        armLiquidationCooldown(symbolClean, "manual position liquidation");
       }
     } catch (err: any) {
       console.error(err);
@@ -3665,6 +3691,7 @@ export default function MarketTerminal() {
                 if (!data.error) {
                   successCount++;
                   addLog(pos.symbol, "LIQUIDATED", `Asset successfully sold ${pos.qty} shares.`, "SUCCESS");
+                  armLiquidationCooldown(pos.symbol, "portfolio liquidation");
                 }
               }
             } catch (posErr) {
@@ -3695,6 +3722,11 @@ export default function MarketTerminal() {
           }
           
           addLog("PORTFOLIO", "LIQUIDATION_COMPLETE", "Alpaca direct portfolio liquidation broadcasted. All broker assets closed out.", "SUCCESS");
+          for (const pos of alpacaPositions) {
+            if (pos.qty > 0) {
+              armLiquidationCooldown(pos.symbol, "portfolio liquidation");
+            }
+          }
           
           setTimeout(() => {
             handleRefreshData();
@@ -3745,6 +3777,11 @@ export default function MarketTerminal() {
           `Simulator closed ALL positions. Cash adjusted by $${cumulativeNetCredit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (Charges: $${cumulativeFees.toFixed(2)}).`,
           "SUCCESS"
         );
+        for (const pos of mockPositions) {
+          if (Math.abs(pos.qty) > 0) {
+            armLiquidationCooldown(pos.symbol, "portfolio liquidation");
+          }
+        }
       }
     } catch (err: any) {
       console.error(err);
