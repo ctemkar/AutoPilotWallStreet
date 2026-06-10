@@ -24,10 +24,8 @@ import { ResponsiveContainer, AreaChart, Area, YAxis } from "recharts";
 import {
   RefreshCw,
   Trash2,
-  Settings,
   Code,
   TrendingUp,
-  TrendingDown,
   AlertTriangle,
   CheckCircle,
   DollarSign,
@@ -80,6 +78,7 @@ interface Log {
 
 type AutopilotOrderOutcomeCode =
   | "FILLED"
+  | "PENDING_BROKER_ACCEPTED"
   | "INVALID_QTY"
   | "BLOCKED_BLACKLIST"
   | "BLOCKED_LOSS_GUARD"
@@ -93,7 +92,7 @@ type AutopilotOrderOutcomeCode =
   | "REJECTED_BROKER";
 
 interface AutopilotOrderResult {
-  status: "FILLED" | "BLOCKED" | "REJECTED" | "INVALID";
+  status: "FILLED" | "PENDING" | "BLOCKED" | "REJECTED" | "INVALID";
   code: AutopilotOrderOutcomeCode;
   symbol: string;
   side: "BUY" | "SELL";
@@ -245,8 +244,6 @@ export default function MarketTerminal() {
   const [angelClientCode, setAngelClientCode] = useState("");
   const [angelMpin, setAngelMpin] = useState("");
   const [angelTotpSeed, setAngelTotpSeed] = useState("");
-  const [showAngelMpin, setShowAngelMpin] = useState(false);
-  const [showAngelTotp, setShowAngelTotp] = useState(false);
 
   // Connection & loading flags
   const [isConnecting, setIsConnecting] = useState(false);
@@ -261,8 +258,7 @@ export default function MarketTerminal() {
   const [startingCapital, setStartingCapital] = useState(3085); // Cash $2,000 + NVDA $220 + AAPL $540 + BTCUSD $325 cost basis
   const [isEditingCash, setIsEditingCash] = useState(false);
   const [tempCashInput, setTempCashInput] = useState("");
-  const [simLeverageLimit, setSimLeverageLimit] = useState(4); // 4x leverage limit
-  const [simMaintRate, setSimMaintRate] = useState(30); // 30% maintenance rate default
+  const simLeverageLimit = 4; // 4x leverage limit
   const [mockPositions, setMockPositions] = useState<Position[]>([
     {
       symbol: "NVDA",
@@ -316,7 +312,7 @@ export default function MarketTerminal() {
   const [alpacaAccount, setAlpacaAccount] = useState<any>(null);
 
   // Orders and log tracking
-  const [orders, setOrders] = useState<Order[]>([]);
+  const [, setOrders] = useState<Order[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
 
   // AI Stress Diagnosis state
@@ -418,7 +414,7 @@ export default function MarketTerminal() {
 
   const [autopilotInterval, setAutopilotInterval] = useState(15); // in seconds
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
-  const [activeVisualizerSymbol, setActiveVisualizerSymbol] = useState<string>("");
+  const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
   const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(15); // e.g. 15% take profit
@@ -428,6 +424,8 @@ export default function MarketTerminal() {
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(30); // percent of portfolio per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(6); // concurrent open positions
+  const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum non-crypto live order size
+  const [liveMinCryptoOrderQty, setLiveMinCryptoOrderQty] = useState<number>(0.0001); // minimum crypto live order size
   const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
 
   const addAutopilotLog = useCallback((msg: string, type: "info" | "success" | "warn" | "trade") => {
@@ -451,8 +449,12 @@ export default function MarketTerminal() {
     try {
       const tp = typeof window !== "undefined" && localStorage.getItem("sentry:globalTP");
       const sl = typeof window !== "undefined" && localStorage.getItem("sentry:globalSL");
+      const minLiveQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinQty");
+      const minLiveCryptoQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinCryptoQty");
       if (tp) setGlobalTakeProfitPercent(Math.max(0, parseFloat(tp)));
       if (sl) setGlobalStopLossPercent(Math.max(0, parseFloat(sl)));
+      if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
+      if (minLiveCryptoQty) setLiveMinCryptoOrderQty(Math.max(0.000001, parseFloat(minLiveCryptoQty)));
     } catch (e) {
       // ignore
     }
@@ -467,10 +469,12 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:minAvgVol", String(minAvgVolume));
         localStorage.setItem("sentry:maxExposurePct", String(maxExposurePercentPerSymbol));
         localStorage.setItem("sentry:maxConcurrent", String(maxConcurrentPositions));
+        localStorage.setItem("sentry:liveMinQty", String(liveMinOrderQty));
+        localStorage.setItem("sentry:liveMinCryptoQty", String(liveMinCryptoOrderQty));
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
       }
     } catch (e) {}
-  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, aggressiveDeleverage]);
+  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage]);
 
   useEffect(() => {
     try {
@@ -588,6 +592,8 @@ export default function MarketTerminal() {
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
   const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
+  const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
+  const autopilotTargetSymbolIndexRef = useRef(0);
 
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
@@ -682,7 +688,9 @@ export default function MarketTerminal() {
     autopilotBlacklist,
     minAvgVolume,
     maxExposurePercentPerSymbol,
-    maxConcurrentPositions
+    maxConcurrentPositions,
+    liveMinOrderQty,
+    liveMinCryptoOrderQty
   });
 
   useEffect(() => {
@@ -715,7 +723,9 @@ export default function MarketTerminal() {
       autopilotBlacklist,
       minAvgVolume,
       maxExposurePercentPerSymbol,
-      maxConcurrentPositions
+      maxConcurrentPositions,
+      liveMinOrderQty,
+      liveMinCryptoOrderQty
     };
   }, [
     useAlpacaLive,
@@ -746,7 +756,9 @@ export default function MarketTerminal() {
     minAvgVolume,
     maxExposurePercentPerSymbol,
     maxConcurrentPositions,
-    autopilotBlacklist
+    autopilotBlacklist,
+    liveMinOrderQty,
+    liveMinCryptoOrderQty
   ]);
 
   // (moved) addAutopilotLog is hoisted above to avoid TDZ issues
@@ -816,7 +828,9 @@ export default function MarketTerminal() {
       const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
       const openCount = (activePositions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
-      if (side === "BUY" && openCount >= (curRef.maxConcurrentPositions || 999)) {
+      const existingLong = activePositions.find((p: any) => p.symbol === symbolClean && parseFloat(p.qty || 0) > 0);
+      // Allow adding to an already-open symbol even when the concurrent-position ceiling is reached.
+      if (side === "BUY" && !existingLong && openCount >= (curRef.maxConcurrentPositions || 999)) {
         addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${curRef.maxConcurrentPositions}) reached.`, "warn");
         addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached.`, "WARNING");
         return {
@@ -841,7 +855,9 @@ export default function MarketTerminal() {
       if (side === "BUY" && (newExposurePct > (curRef.maxExposurePercentPerSymbol || 100))) {
         const capPct = curRef.maxExposurePercentPerSymbol || 100;
         const maxAdditionalValue = (totalPortfolio * (capPct / 100)) - currentPosVal;
-        const minExecutableQty = symbolClean === "BTCUSD" ? 0.0005 : 0.05;
+        const minExecutableQty = symbolClean === "BTCUSD"
+          ? Math.max(0.000001, Number(curRef.liveMinCryptoOrderQty) || 0.0001)
+          : Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01);
 
         if (maxAdditionalValue <= 0) {
           addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: current exposure already at or above ${capPct}% cap.`, "warn");
@@ -991,7 +1007,9 @@ export default function MarketTerminal() {
                 finalQty = parseFloat(safeQty.toFixed(2));
               }
 
-              if (finalQty <= (symbolClean === "BTCUSD" ? 0.0005 : 0.05)) {
+              if (finalQty <= (symbolClean === "BTCUSD"
+                ? Math.max(0.000001, Number(curRef.liveMinCryptoOrderQty) || 0.0001)
+                : Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01))) {
                 addAutopilotLog(`Blocked live automated BUY: Affordable size ${finalQty} for ${symbolClean} is negligible. BP: ${maxAllowedPower.toFixed(2)} (safe cap: ${maxSafeOrderVal.toFixed(2)}), price: ${estPrice.toFixed(2)}.`, "warn");
                 addLog(symbolClean, "AUTO_BUY_BLOCKED", `Affordable size ${finalQty} is too small to execute. Balance: ${maxAllowedPower.toFixed(2)}.`, "WARNING");
                 return {
@@ -1089,13 +1107,34 @@ export default function MarketTerminal() {
           throw new Error(dataOrder?.error || "Brokerage error response");
         }
 
-        addAutopilotLog(`Automated Live Order FILLED! ID: ${dataOrder.id || "Success"}.`, "success");
-        addLog(
-          symbolClean,
-          `${side}_FILLED`,
-          `Live automated market order executed for ${finalQty} share(s) of ${symbolClean}.`,
-          "SUCCESS"
-        );
+        const brokerStatus = String(dataOrder.status || "ACCEPTED").toUpperCase();
+        const filledQty = Number.parseFloat(String(dataOrder.filled_qty ?? "0"));
+        const isFilledStatus = brokerStatus === "FILLED" || brokerStatus === "PARTIALLY_FILLED";
+
+        if (side === "BUY") {
+          if (isFilledStatus) {
+            autopilotPendingBuySymbolsRef.current.delete(symbolClean);
+          } else {
+            autopilotPendingBuySymbolsRef.current.add(symbolClean);
+            // Avoid sticky pending state forever when broker status updates are delayed.
+            setTimeout(() => {
+              autopilotPendingBuySymbolsRef.current.delete(symbolClean);
+            }, 90000);
+          }
+        }
+
+        if (isFilledStatus) {
+          addAutopilotLog(`Automated Live Order FILLED! ID: ${dataOrder.id || "Success"}.`, "success");
+          addLog(
+            symbolClean,
+            `${side}_FILLED`,
+            `Live automated market order executed for ${(Number.isFinite(filledQty) && filledQty > 0 ? filledQty : finalQty)} share(s) of ${symbolClean}.`,
+            "SUCCESS"
+          );
+        } else {
+          addAutopilotLog(`Automated Live Order ACCEPTED by broker (status: ${brokerStatus}). Awaiting fill confirmation...`, "info");
+          addLog(symbolClean, `${side}_ACCEPTED`, `Live automated order accepted by broker (status: ${brokerStatus}).`, "INFO");
+        }
 
         const newOrderObj: Order = {
           id: dataOrder.id || `ord-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -1114,18 +1153,33 @@ export default function MarketTerminal() {
           }
         }, 1200);
 
+        if (isFilledStatus) {
+          return {
+            status: "FILLED",
+            code: "FILLED",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: Number.isFinite(filledQty) && filledQty > 0 ? filledQty : finalQty,
+            message: "Live order filled."
+          };
+        }
+
         return {
-          status: "FILLED",
-          code: "FILLED",
+          status: "PENDING",
+          code: "PENDING_BROKER_ACCEPTED",
           symbol: symbolClean,
           side,
           requestedQty: qtyNum,
-          executedQty: finalQty,
-          message: "Live order filled."
+          executedQty: Number.isFinite(filledQty) && filledQty > 0 ? filledQty : 0,
+          message: `Live order accepted by broker (status: ${brokerStatus}). Awaiting fill confirmation.`
         };
 
       } catch (err: any) {
         console.error(err);
+        if (side === "BUY") {
+          autopilotPendingBuySymbolsRef.current.delete(symbolClean);
+        }
         let errorMsg = err.message || "Broker block";
         if (errorMsg.includes("is not allowed to short") || errorMsg.includes("shorting")) {
           errorMsg = "Account is not allowed to short. Standard Alpaca Cash and non-margin accounts cannot short-sell. Swap to Local Risk Simulator to fully trade short strategies!";
@@ -1178,27 +1232,51 @@ export default function MarketTerminal() {
       }
 
       const orderFees = parseFloat((flatBrokerage + orderCost * taxRate + orderCost * slippageRate).toFixed(2));
+      let simulatedExecutedQty = qtyNum;
 
       if (side === "BUY") {
-        const totalDebitWithFees = orderCost + orderFees;
+        let execQty = qtyNum;
+        let execOrderCost = orderCost;
+        let execOrderFees = orderFees;
+        let totalDebitWithFees = execOrderCost + execOrderFees;
+
         if (totalDebitWithFees > curRef.simCash) {
-          addAutopilotLog(`Blocked automated simulation: Insufficient sim balance. Needs ${currencySymbol}${totalDebitWithFees.toFixed(2)} (including ${currencySymbol}${orderFees.toFixed(2)} fees/taxes).`, "warn");
-          addLog(symbolClean, "AUTO_BUY_SIM_FAILED", `Simulated cash reserves exhausted. Needs ${currencySymbol}${totalDebitWithFees.toFixed(2)} to cover order & fees.`, "WARNING");
-          return {
-            status: "BLOCKED",
-            code: "BLOCKED_CASH_BUFFER",
-            symbol: symbolClean,
-            side,
-            requestedQty: qtyNum,
-            executedQty: 0,
-            message: `Insufficient simulated cash. Needed ${currencySymbol}${totalDebitWithFees.toFixed(2)}.`
-          };
+          const variableRate = taxRate + slippageRate;
+          const maxAffordableQtyRaw = (curRef.simCash - flatBrokerage) / (estPrice * (1 + variableRate));
+          const minExecutableQty = symbolClean === "BTCUSD" ? 0.0001 : 0.01;
+          const resizedQty = symbolClean === "BTCUSD"
+            ? parseFloat(Math.max(0, maxAffordableQtyRaw).toFixed(4))
+            : parseFloat(Math.max(0, maxAffordableQtyRaw).toFixed(2));
+
+          if (Number.isFinite(resizedQty) && resizedQty >= minExecutableQty && resizedQty < qtyNum) {
+            execQty = resizedQty;
+            execOrderCost = estPrice * execQty;
+            execOrderFees = parseFloat((flatBrokerage + execOrderCost * taxRate + execOrderCost * slippageRate).toFixed(2));
+            totalDebitWithFees = execOrderCost + execOrderFees;
+            addAutopilotLog(`📉 Sim cash resize: ${symbolClean} BUY reduced from ${qtyNum} to ${execQty} to fit available balance ${currencySymbol}${curRef.simCash.toFixed(2)}.`, "info");
+            addLog(symbolClean, "AUTO_TRADE_RESIZED", `Auto-resized simulated BUY ${symbolClean} from ${qtyNum} to ${execQty} due to cash limit.`, "INFO");
+          } else {
+            addAutopilotLog(`Blocked automated simulation: Insufficient sim balance. Needs ${currencySymbol}${totalDebitWithFees.toFixed(2)} (including ${currencySymbol}${execOrderFees.toFixed(2)} fees/taxes).`, "warn");
+            addLog(symbolClean, "AUTO_BUY_SIM_FAILED", `Simulated cash reserves exhausted. Needs ${currencySymbol}${totalDebitWithFees.toFixed(2)} to cover order & fees.`, "WARNING");
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_CASH_BUFFER",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: `Insufficient simulated cash. Needed ${currencySymbol}${totalDebitWithFees.toFixed(2)}.`
+            };
+          }
         }
+
+        simulatedExecutedQty = execQty;
+
         setSimCash((c) => c - totalDebitWithFees);
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
-            const updatedQty = exists.qty + qtyNum;
+            const updatedQty = exists.qty + execQty;
             if (Math.abs(updatedQty) < 0.0001) {
               return prev.filter((p) => p.symbol !== symbolClean);
             }
@@ -1206,7 +1284,7 @@ export default function MarketTerminal() {
             let unrealized = 0;
             if (exists.qty > 0) {
               // Include fee drag directly into average entry price to represent true dynamic breakeven!
-              const actualSpent = exists.avg_entry_price * exists.qty + orderCost + orderFees;
+              const actualSpent = exists.avg_entry_price * exists.qty + execOrderCost + execOrderFees;
               newAvgEntry = actualSpent / updatedQty;
               unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
             } else {
@@ -1214,7 +1292,7 @@ export default function MarketTerminal() {
                 newAvgEntry = exists.avg_entry_price;
                 unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
               } else {
-                newAvgEntry = (orderCost + orderFees) / updatedQty;
+                newAvgEntry = (execOrderCost + execOrderFees) / updatedQty;
                 unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
               }
             }
@@ -1231,24 +1309,24 @@ export default function MarketTerminal() {
             );
           } else {
             // Adjust average entry price to incorporate transaction cost drag
-            const realAvgEntry = parseFloat(((orderCost + orderFees) / qtyNum).toFixed(4));
+            const realAvgEntry = parseFloat(((execOrderCost + execOrderFees) / execQty).toFixed(4));
             return [
               ...prev,
               {
                 symbol: symbolClean,
-                qty: qtyNum,
+                qty: execQty,
                 avg_entry_price: realAvgEntry,
                 current_price: estPrice,
-                market_value: parseFloat(orderCost.toFixed(2)),
-                unrealized_pl: parseFloat((orderCost - realAvgEntry * qtyNum).toFixed(2)),
+                market_value: parseFloat(execOrderCost.toFixed(2)),
+                unrealized_pl: parseFloat((execOrderCost - realAvgEntry * execQty).toFixed(2)),
                 unrealized_plpc: 0,
                 maintenance_margin_rate: 0.30,
               },
             ];
           }
         });
-        addAutopilotLog(`Sim purchase complete: Acquired ${qtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees & slippage deducted: ${currencySymbol}${orderFees.toFixed(2)}).`, "success");
-        addLog(symbolClean, "AUTO_BUY_SIM", `Purchased simulated ${qtyNum} shares of ${symbolClean} at fee-adjusted cost basis (Fee: ${currencySymbol}${orderFees.toFixed(2)})`, "SUCCESS");
+        addAutopilotLog(`Sim purchase complete: Acquired ${execQty} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees & slippage deducted: ${currencySymbol}${execOrderFees.toFixed(2)}).`, "success");
+        addLog(symbolClean, "AUTO_BUY_SIM", `Purchased simulated ${execQty} shares of ${symbolClean} at fee-adjusted cost basis (Fee: ${currencySymbol}${execOrderFees.toFixed(2)})`, "SUCCESS");
       } else {
         // Simulated SELL (With support for Short Selling / Cover)
         // Deduct fees from proceeds
@@ -1317,7 +1395,7 @@ export default function MarketTerminal() {
           id: `sim-auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
           symbol: symbolClean,
           side: side,
-          qty: qtyNum,
+          qty: side === "BUY" ? simulatedExecutedQty : qtyNum,
           price: estPrice,
           status: "FILLED_MOCK_AUTO",
           submittedAt: new Date().toLocaleTimeString(),
@@ -1331,7 +1409,7 @@ export default function MarketTerminal() {
         symbol: symbolClean,
         side,
         requestedQty: qtyNum,
-        executedQty: qtyNum,
+        executedQty: side === "BUY" ? simulatedExecutedQty : qtyNum,
         message: "Simulated order filled."
       };
     }
@@ -1342,6 +1420,8 @@ export default function MarketTerminal() {
     const qtyText = outcome.executedQty > 0 ? outcome.executedQty : outcome.requestedQty;
     if (outcome.status === "FILLED") {
       addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${qtyText} ${outcome.symbol} (${outcome.code}).`, "success");
+    } else if (outcome.status === "PENDING") {
+      addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${outcome.requestedQty} ${outcome.symbol} (${outcome.code}) - ${outcome.message}`, "info");
     } else if (outcome.status === "BLOCKED") {
       addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${outcome.requestedQty} ${outcome.symbol} (${outcome.code}) - ${outcome.message}`, "warn");
     } else {
@@ -1407,7 +1487,14 @@ export default function MarketTerminal() {
       const currentMaintMargin = currentActivePositions.reduce((sum, pos) => sum + (pos.current_price * Math.abs(pos.qty) * pos.maintenance_margin_rate), 0);
       const currentCapacity = currentTotalEquity > 0 ? (currentMaintMargin / currentTotalEquity) * 100 : 0;
 
-      const targetSymbol = (curRef.autopilotTargetTicker || "AAPL").toUpperCase().trim() || "AAPL";
+      const parsedTargets = (curRef.autopilotTargetTicker || "AAPL")
+        .split(/[\s,]+/)
+        .map((s: string) => s.trim().toUpperCase())
+        .filter(Boolean);
+      const scanTargets = parsedTargets.length > 0 ? parsedTargets : ["AAPL"];
+      const targetIdx = autopilotTargetSymbolIndexRef.current % scanTargets.length;
+      const targetSymbol = scanTargets[targetIdx];
+      autopilotTargetSymbolIndexRef.current = (targetIdx + 1) % scanTargets.length;
 
       if (curRef.autopilotStrategy === "SENTRY_HEAL") {
         if (currentCapacity >= curRef.warnThreshold) {
@@ -1461,6 +1548,20 @@ export default function MarketTerminal() {
           else if (targetSymbol === "MSFT") currentSpotPrice = 425.0;
         }
 
+        const existingScalperPos = currentActivePositions.find((p) => p.symbol === targetSymbol);
+        const hasPendingSeedBuy = autopilotPendingBuySymbolsRef.current.has(targetSymbol);
+        if (hasPendingSeedBuy) {
+          addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
+          return;
+        }
+        if (!existingScalperPos || existingScalperPos.qty <= 0) {
+          const seedQty = targetSymbol === "BTCUSD" ? 0.002 : 1;
+          addAutopilotLog(`Scalper bootstrap: no active ${targetSymbol} position found. Attempting seed BUY ${seedQty}.`, "trade");
+          const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", seedQty);
+          logScanOrderOutcome("SCALPER", orderOutcome);
+          return;
+        }
+
         const randSeed = Math.random();
         if (randSeed > 0.55) {
           const buyQty = targetSymbol === "BTCUSD" ? 0.02 : 5;
@@ -1469,8 +1570,10 @@ export default function MarketTerminal() {
           logScanOrderOutcome("SCALPER", orderOutcome);
         } else if (randSeed < 0.25) {
           const exists = currentActivePositions.find((p) => p.symbol === targetSymbol);
-          if (exists && exists.qty >= (targetSymbol === "BTCUSD" ? 0.02 : 2)) {
-            const sellQty = targetSymbol === "BTCUSD" ? 0.02 : Math.min(exists.qty, 5);
+          if (exists && exists.qty > 0) {
+            const sellQty = targetSymbol === "BTCUSD"
+              ? Math.min(exists.qty, 0.02)
+              : Math.min(exists.qty, 5);
             addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) hit local resistance spike. Attempting SELL order.`, "trade");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
@@ -3443,7 +3546,7 @@ export default function MarketTerminal() {
     if (confirmModalType === "position" && confirmModalSymbol) {
       await handleLiquidatePosition(confirmModalSymbol);
     } else if (confirmModalType === "portfolio") {
-      await handleLiquidatePortfolio(true as any);
+      await handleLiquidatePortfolio();
     }
     setConfirmModalType(null);
     setConfirmModalSymbol(null);
@@ -5057,6 +5160,35 @@ if __name__ == "__main__":
                     </div>
                   </div>
 
+                  <div className="grid grid-cols-2 gap-3 pt-3" id="live-min-qty-row">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Live Min Qty (Stocks)</label>
+                      <input
+                        id="live-min-qty-input"
+                        type="number"
+                        min={0.0001}
+                        step={0.01}
+                        value={liveMinOrderQty}
+                        onChange={(e) => setLiveMinOrderQty(Number.isFinite(parseFloat(e.target.value)) ? Math.max(0.0001, parseFloat(e.target.value)) : 0.01)}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                      />
+                      <p className="text-[9px] text-gray-500 mt-1">Minimum live equity size after auto-resizing.</p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Live Min Qty (Crypto)</label>
+                      <input
+                        id="live-min-crypto-qty-input"
+                        type="number"
+                        min={0.000001}
+                        step={0.0001}
+                        value={liveMinCryptoOrderQty}
+                        onChange={(e) => setLiveMinCryptoOrderQty(Number.isFinite(parseFloat(e.target.value)) ? Math.max(0.000001, parseFloat(e.target.value)) : 0.0001)}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                      />
+                      <p className="text-[9px] text-gray-500 mt-1">Minimum live crypto size after auto-resizing.</p>
+                    </div>
+                  </div>
+
                   <div className="flex items-center gap-3 mt-3 font-mono text-sm">
                     <div className="flex-1">
                       <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Margin Warning Threshold</label>
@@ -5566,6 +5698,8 @@ if __name__ == "__main__":
                         className={`text-[10px] px-2 py-0.5 rounded font-bold border ${
                           lastAutopilotOrderOutcome.status === "FILLED"
                             ? "text-brand-green border-brand-green/40 bg-emerald-950/30"
+                            : lastAutopilotOrderOutcome.status === "PENDING"
+                            ? "text-sky-300 border-sky-400/40 bg-sky-950/30"
                             : lastAutopilotOrderOutcome.status === "BLOCKED"
                             ? "text-yellow-400 border-yellow-500/40 bg-yellow-950/25"
                             : "text-brand-red border-brand-red/40 bg-red-950/25"

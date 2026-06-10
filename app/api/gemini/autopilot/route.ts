@@ -7,12 +7,9 @@ const apiKey = process.env.GEMINI_API_KEY;
 
 // Shared mechanical rule-based fallback decision function - fully crash-proofed
 function getLocalFallbackDecision(
-  positions: any,
-  cash: any,
   targetSymbol: any,
   marginCapacityUsed: any,
   warnThreshold: any,
-  currencySign: string = "$",
   errorSnippet?: string
 ) {
   const safeMarginCapacityUsed = typeof marginCapacityUsed === "number" ? marginCapacityUsed : parseFloat(marginCapacityUsed) || 0;
@@ -69,7 +66,7 @@ export async function POST(req: Request) {
 
     // 1. Primary Fallback: No API Key configured
     if (!apiKey) {
-      const fallback = getLocalFallbackDecision(positions, cash, targetSymbol, marginCapacityUsed, warnThreshold, currencySign);
+      const fallback = getLocalFallbackDecision(targetSymbol, marginCapacityUsed, warnThreshold);
       return NextResponse.json(fallback);
     }
 
@@ -169,7 +166,7 @@ Make your decision tactical and realistic.`;
         });
       } catch (parseError) {
         console.error("Failed to parse Gemini decision json:", response.text, parseError);
-        const fallback = getLocalFallbackDecision(positions, cash, targetSymbol, marginCapacityUsed, warnThreshold, "JSON Parse Error");
+        const fallback = getLocalFallbackDecision(targetSymbol, marginCapacityUsed, warnThreshold, "JSON Parse Error");
         return NextResponse.json(fallback);
       }
 
@@ -188,7 +185,7 @@ Make your decision tactical and realistic.`;
         ? "Rate Limited (429)"
         : "Service Error";
         
-      const fallback = getLocalFallbackDecision(positions, cash, targetSymbol, marginCapacityUsed, warnThreshold, errorSnippet);
+      const fallback = getLocalFallbackDecision(targetSymbol, marginCapacityUsed, warnThreshold, errorSnippet);
       return NextResponse.json(fallback);
     }
   } catch (globalError: any) {
