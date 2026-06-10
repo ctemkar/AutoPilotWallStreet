@@ -365,7 +365,7 @@ export default function MarketTerminal() {
 
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(false);
-  const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT">("GEMINI_AI");
+  const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT">("SCALPER");
   
   // --- TOUCH & TURN OPENING-RANGE SCALPER STATE MAP ---
   const [touchTurnStateMap, setTouchTurnStateMap] = useState<Record<string, {
@@ -426,7 +426,7 @@ export default function MarketTerminal() {
 
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(5); // percent of portfolio per symbol
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(30); // percent of portfolio per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(6); // concurrent open positions
   const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
 
@@ -580,12 +580,14 @@ export default function MarketTerminal() {
       type: "info"
     }
   ]);
+  const [lastAutopilotOrderOutcome, setLastAutopilotOrderOutcome] = useState<AutopilotOrderResult | null>(null);
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
+  const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
 
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
@@ -1307,6 +1309,7 @@ export default function MarketTerminal() {
   }, [addAutopilotLog, addLog]);
 
   const logScanOrderOutcome = useCallback((source: string, outcome: AutopilotOrderResult) => {
+    setLastAutopilotOrderOutcome(outcome);
     const qtyText = outcome.executedQty > 0 ? outcome.executedQty : outcome.requestedQty;
     if (outcome.status === "FILLED") {
       addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${qtyText} ${outcome.symbol} (${outcome.code}).`, "success");
@@ -1344,17 +1347,19 @@ export default function MarketTerminal() {
 
     if (highestExposure.qty > 0) {
       addAutopilotLog(`Manual deleverage: selling ${rawQty} of ${highestExposure.symbol}.`, "warn");
-      await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
+      const orderOutcome = await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
+      logScanOrderOutcome("MANUAL_DELEVERAGE", orderOutcome);
       setToast({ message: `Sold ${rawQty} ${highestExposure.symbol}`, level: "success" });
     } else {
       addAutopilotLog(`Manual deleverage: buying ${rawQty} to cover short ${highestExposure.symbol}.`, "warn");
-      await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
+      const orderOutcome = await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
+      logScanOrderOutcome("MANUAL_DELEVERAGE", orderOutcome);
       setToast({ message: `Covered ${rawQty} ${highestExposure.symbol}`, level: "success" });
     }
 
     // auto-clear toast after 4 seconds
     setTimeout(() => setToast(null), 4000);
-  }, [executeAutopilotOrder, addAutopilotLog]);
+  }, [executeAutopilotOrder, addAutopilotLog, logScanOrderOutcome]);
 
   const executeAutopilotScan = useCallback(async () => {
     const curRef = stateRef.current;
@@ -1376,10 +1381,11 @@ export default function MarketTerminal() {
       const targetSymbol = (curRef.autopilotTargetTicker || "AAPL").toUpperCase().trim() || "AAPL";
 
       if (curRef.autopilotStrategy === "SENTRY_HEAL") {
-        addAutopilotLog(`Checking Margin Levels... Usage: ${currentCapacity.toFixed(1)}% | Ceiling Limit: ${curRef.warnThreshold}%.`, "info");
-        
         if (currentCapacity >= curRef.warnThreshold) {
-          addAutopilotLog(`⚠️ Hazard: Over-allocation! Margin ${currentCapacity.toFixed(1)}% exceeds alert threshold. Triggering AutoDeleverage defender...`, "warn");
+          if (sentryHealthStateRef.current !== "warning") {
+            addAutopilotLog(`⚠️ Hazard: Over-allocation! Margin ${currentCapacity.toFixed(1)}% exceeds alert threshold ${curRef.warnThreshold}%. Triggering AutoDeleverage defender...`, "warn");
+            sentryHealthStateRef.current = "warning";
+          }
           
           if (currentActivePositions.length === 0) {
             addAutopilotLog(`Nothing to sell to deleverage. Holdings are empty.`, "warn");
@@ -1404,7 +1410,10 @@ export default function MarketTerminal() {
             }
           }
         } else {
-          addAutopilotLog(`Usage status is healthy. Autopilot deleveraging idle.`, "success");
+          if (sentryHealthStateRef.current !== "healthy") {
+            addAutopilotLog(`Usage status is healthy (${currentCapacity.toFixed(1)}% / ${curRef.warnThreshold}%). Autopilot deleveraging idle.`, "success");
+            sentryHealthStateRef.current = "healthy";
+          }
         }
       }
 
@@ -5520,6 +5529,32 @@ if __name__ == "__main__":
                 </div>
 
                 {/* Micro Real-time activity log specific to Sentry Autopilot */}
+                {lastAutopilotOrderOutcome && (
+                  <div className="bg-brand-bg/60 p-3 rounded-lg border border-brand-border space-y-1.5 font-mono" id="last-autopilot-outcome-card">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Last Order Outcome</span>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded font-bold border ${
+                          lastAutopilotOrderOutcome.status === "FILLED"
+                            ? "text-brand-green border-brand-green/40 bg-emerald-950/30"
+                            : lastAutopilotOrderOutcome.status === "BLOCKED"
+                            ? "text-yellow-400 border-yellow-500/40 bg-yellow-950/25"
+                            : "text-brand-red border-brand-red/40 bg-red-950/25"
+                        }`}
+                      >
+                        {lastAutopilotOrderOutcome.status}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-white">
+                      {lastAutopilotOrderOutcome.side} {lastAutopilotOrderOutcome.requestedQty} {lastAutopilotOrderOutcome.symbol}
+                    </div>
+                    <div className="text-[10px] text-gray-400">
+                      Code: <span className="text-gray-300 font-bold">{lastAutopilotOrderOutcome.code}</span>
+                    </div>
+                    <div className="text-[10px] text-gray-400 leading-relaxed">{lastAutopilotOrderOutcome.message}</div>
+                  </div>
+                )}
+
                 <div>
                   <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 font-mono">
                     🤖 Autopilot Activity feed
