@@ -934,6 +934,18 @@ export default function MarketTerminal() {
       }
 
       let finalQty = qtyNum;
+      let liveEstimatedPrice = 150.0;
+
+      const matchedLiveTicker = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
+      if (matchedLiveTicker) {
+        liveEstimatedPrice = matchedLiveTicker.current_price;
+      } else {
+        if (symbolClean === "AAPL") liveEstimatedPrice = 182.2;
+        else if (symbolClean === "TSLA") liveEstimatedPrice = 195.0;
+        else if (symbolClean === "NVDA") liveEstimatedPrice = 115.5;
+        else if (symbolClean === "BTCUSD") liveEstimatedPrice = 67200.0;
+        else if (symbolClean === "MSFT") liveEstimatedPrice = 425.0;
+      }
 
       if (curRef.brokerType === "ANGELONE") {
         if (side === "BUY") {
@@ -995,17 +1007,7 @@ export default function MarketTerminal() {
         }
       } else {
         if (side === "BUY") {
-          let estPrice = 150.0;
-          const matchedTicker = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
-          if (matchedTicker) {
-            estPrice = matchedTicker.current_price;
-          } else {
-            if (symbolClean === "AAPL") estPrice = 182.2;
-            else if (symbolClean === "TSLA") estPrice = 195.0;
-            else if (symbolClean === "NVDA") estPrice = 115.5;
-            else if (symbolClean === "BTCUSD") estPrice = 67200.0;
-            else if (symbolClean === "MSFT") estPrice = 425.0;
-          }
+          const estPrice = liveEstimatedPrice;
 
           const estimatedCost = estPrice * qtyNum;
           const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
@@ -1109,7 +1111,7 @@ export default function MarketTerminal() {
               symbol: symbolClean,
               qty: finalQty,
               side: side.toLowerCase(),
-              estimatedPrice: estPrice,
+              estimatedPrice: liveEstimatedPrice,
             }),
           });
         }
