@@ -413,7 +413,7 @@ export default function MarketTerminal() {
     lastCandleAction: string;
   }>>({});
 
-  const [autopilotInterval, setAutopilotInterval] = useState(15); // in seconds
+  const [autopilotInterval, setAutopilotInterval] = useState(10); // in seconds
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [activeVisualizerSymbol] = useState<string>("");
 
@@ -596,7 +596,7 @@ export default function MarketTerminal() {
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
   const autopilotTargetSymbolIndexRef = useRef(0);
-  const LIQUIDATION_COOLDOWN_MS = 5 * 60 * 1000;
+  const LIQUIDATION_COOLDOWN_MS = 30 * 60 * 1000;
 
   const armLiquidationCooldown = useCallback((symbol: string, source: string) => {
     const symbolClean = symbol.toUpperCase().trim();
@@ -1156,10 +1156,16 @@ export default function MarketTerminal() {
             autopilotPendingBuySymbolsRef.current.delete(symbolClean);
           } else {
             autopilotPendingBuySymbolsRef.current.add(symbolClean);
+            const tinyOrderTimeoutMs = 30000;
+            const standardOrderTimeoutMs = 90000;
+            const isTinyOrder = symbolClean === "BTCUSD"
+              ? finalQty <= Math.max(0.002, (Number(curRef.liveMinCryptoOrderQty) || 0.0001) * 4)
+              : finalQty <= Math.max(0.25, (Number(curRef.liveMinOrderQty) || 0.01) * 10);
+            const pendingClearTimeoutMs = isTinyOrder ? tinyOrderTimeoutMs : standardOrderTimeoutMs;
             // Avoid sticky pending state forever when broker status updates are delayed.
             setTimeout(() => {
               autopilotPendingBuySymbolsRef.current.delete(symbolClean);
-            }, 90000);
+            }, pendingClearTimeoutMs);
           }
         }
 
@@ -3555,8 +3561,14 @@ export default function MarketTerminal() {
               symbol: symbolClean,
             }),
           });
-          
-          const rawData = await response.json();
+
+          const resText = await response.text();
+          let rawData: any = null;
+          try {
+            rawData = JSON.parse(resText);
+          } catch (e) {
+            throw new Error(`Liquidation endpoint returned non-JSON response: ${resText.slice(0, 120).trim()}...`);
+          }
           if (!response.ok || rawData?.error) {
             throw new Error(rawData?.error || "Liquidation rejected by Alpaca.");
           }
@@ -3715,8 +3727,14 @@ export default function MarketTerminal() {
               isPaper,
             }),
           });
-          
-          const rawData = await response.json();
+
+          const resText = await response.text();
+          let rawData: any = null;
+          try {
+            rawData = JSON.parse(resText);
+          } catch (e) {
+            throw new Error(`Liquidation endpoint returned non-JSON response: ${resText.slice(0, 120).trim()}...`);
+          }
           if (!response.ok || rawData?.error) {
             throw new Error(rawData?.error || "Portfolio liquidation rejected by Alpaca.");
           }
@@ -5114,6 +5132,11 @@ if __name__ == "__main__":
                       ? "Bot is actively intercepting and optimizing positions automatically."
                       : "Bot idle. Activate to take over trading based on rules / AI directives."}
                   </p>
+                  {lastAutopilotOrderOutcome?.status === "PENDING" && (
+                    <div id="autopilot-broker-pending-badge" className="mt-2 rounded-md border border-amber-600/60 bg-amber-950/30 px-2.5 py-1.5 text-[10px] text-amber-300 font-mono text-center">
+                      Broker fill pending: {lastAutopilotOrderOutcome.side} {lastAutopilotOrderOutcome.requestedQty} {lastAutopilotOrderOutcome.symbol}. Waiting for broker confirmation before next seed buy.
+                    </div>
+                  )}
                 </div>
 
                 {/* Configurator parameters inside standard flex rows */}
