@@ -78,6 +78,30 @@ interface Log {
   status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO";
 }
 
+type AutopilotOrderOutcomeCode =
+  | "FILLED"
+  | "INVALID_QTY"
+  | "BLOCKED_BLACKLIST"
+  | "BLOCKED_LOSS_GUARD"
+  | "BLOCKED_MAX_CONCURRENT"
+  | "BLOCKED_EXPOSURE_CAP"
+  | "BLOCKED_DISCONNECTED"
+  | "BLOCKED_CASH_BUFFER"
+  | "BLOCKED_SHORT_RESTRICTED"
+  | "BLOCKED_NEGLIGIBLE_QTY"
+  | "BLOCKED_BUYING_POWER"
+  | "REJECTED_BROKER";
+
+interface AutopilotOrderResult {
+  status: "FILLED" | "BLOCKED" | "REJECTED" | "INVALID";
+  code: AutopilotOrderOutcomeCode;
+  symbol: string;
+  side: "BUY" | "SELL";
+  requestedQty: number;
+  executedQty: number;
+  message: string;
+}
+
 // Sparkline component to visualize the last 24 hours of unrealized P/L performance
 function PositionSparkline({ symbol, currentPl, totalCost }: { symbol: string; currentPl: number; totalCost: number }) {
   const [mounted, setMounted] = useState(false);
@@ -408,6 +432,10 @@ export default function MarketTerminal() {
 
   const addAutopilotLog = useCallback((msg: string, type: "info" | "success" | "warn" | "trade") => {
     setAutopilotLogs((prev) => {
+      // Suppress exact consecutive duplicates to avoid log spam during polling loops.
+      if (prev[0]?.msg === msg && prev[0]?.type === type) {
+        return prev;
+      }
       const newLog = {
         id: `ap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
         time: new Date().toLocaleTimeString(),
@@ -429,45 +457,6 @@ export default function MarketTerminal() {
       // ignore
     }
   }, [addAutopilotLog, addLog]);
-
-  // Immediate deleverage command callable from UI (moved here to avoid TDZ)
-  const performDeleverage = useCallback(async () => {
-    const curRef = stateRef.current;
-    addAutopilotLog(`Manual deleverage requested. Evaluating exposures...`, "info");
-
-    const currentActivePositions: Position[] = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
-    if (!currentActivePositions || currentActivePositions.length === 0) {
-      addAutopilotLog("Nothing to deleverage: no active positions.", "warn");
-      return;
-    }
-
-    const highestExposure = [...currentActivePositions].sort((a, b) => {
-      const aCost = a.current_price * Math.abs(a.qty) * a.maintenance_margin_rate;
-      const bCost = b.current_price * Math.abs(b.qty) * b.maintenance_margin_rate;
-      return bCost - aCost;
-    })[0];
-
-    if (!highestExposure) {
-      addAutopilotLog("No exposures found for deleveraging.", "warn");
-      return;
-    }
-
-    const qtyAbs = Math.abs(highestExposure.qty);
-    const rawQty = Math.max(1, Math.round(qtyAbs * (curRef.aggressiveDeleverage ? 0.5 : 0.2)) || 1);
-
-    if (highestExposure.qty > 0) {
-      addAutopilotLog(`Manual deleverage: selling ${rawQty} of ${highestExposure.symbol}.`, "warn");
-      await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
-      setToast({ message: `Sold ${rawQty} ${highestExposure.symbol}`, level: "success" });
-    } else {
-      addAutopilotLog(`Manual deleverage: buying ${rawQty} to cover short ${highestExposure.symbol}.`, "warn");
-      await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
-      setToast({ message: `Covered ${rawQty} ${highestExposure.symbol}`, level: "success" });
-    }
-
-    // auto-clear toast after 4 seconds
-    setTimeout(() => setToast(null), 4000);
-  }, [executeAutopilotOrder, addAutopilotLog]);
 
   // Persist TP/SL whenever they change
   useEffect(() => {
@@ -596,6 +585,7 @@ export default function MarketTerminal() {
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
+  const prevAutopilotActiveRef = useRef<boolean | null>(null);
 
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
@@ -759,16 +749,34 @@ export default function MarketTerminal() {
 
   // (moved) addAutopilotLog is hoisted above to avoid TDZ issues
 
-  const executeAutopilotOrder = useCallback(async (symbolClean: string, side: "BUY" | "SELL", qtyNum: number) => {
+  const executeAutopilotOrder = useCallback(async (symbolClean: string, side: "BUY" | "SELL", qtyNum: number): Promise<AutopilotOrderResult> => {
     const curRef = stateRef.current;
-    if (qtyNum <= 0) return;
+    if (qtyNum <= 0) {
+      return {
+        status: "INVALID",
+        code: "INVALID_QTY",
+        symbol: symbolClean.toUpperCase().trim(),
+        side,
+        requestedQty: qtyNum,
+        executedQty: 0,
+        message: "Quantity must be greater than zero."
+      };
+    }
     symbolClean = symbolClean.toUpperCase().trim();
 
     // Automated Blacklist Intercept Check (e.g. to avoid trading low-winrate or banned symbols like TSLA in Autopilot entirely)
     if (curRef.autopilotBlacklist?.includes(symbolClean)) {
       addAutopilotLog(`🚫 Blacklist Blocked automated ${side} order of ${symbolClean}: symbol is blacklisted in Autopilot Control Hub.`, "warn");
       addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Autopilot Blacklist intercepted/prevented ${side} order for ${symbolClean}.`, "WARNING");
-      return;
+      return {
+        status: "BLOCKED",
+        code: "BLOCKED_BLACKLIST",
+        symbol: symbolClean,
+        side,
+        requestedQty: qtyNum,
+        executedQty: 0,
+        message: `Symbol ${symbolClean} is blacklisted.`
+      };
     }
 
     // Sentry Loss Guard Check - prevents buying more when a position is under drawdown and losing money
@@ -784,7 +792,15 @@ export default function MarketTerminal() {
           if (pl < 0) {
             addAutopilotLog(`🛡️ Loss Guard Blocked BUY of ${symbolClean}: existing position is holding a paper loss of $${pl.toFixed(2)}. Capital protected from average-down traps!`, "warn");
             addLog(symbolClean, "AUTO_BUY_BLOCKED", `Sentry Loss Guard withheld automated buy order of ${symbolClean} to avoid averaging down on a losing holding.`, "WARNING");
-            return;
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_LOSS_GUARD",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: `Loss guard blocked averaging down on ${symbolClean}.`
+            };
           }
         }
       }
@@ -801,7 +817,15 @@ export default function MarketTerminal() {
       if (side === "BUY" && openCount >= (curRef.maxConcurrentPositions || 999)) {
         addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${curRef.maxConcurrentPositions}) reached.`, "warn");
         addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached.`, "WARNING");
-        return;
+        return {
+          status: "BLOCKED",
+          code: "BLOCKED_MAX_CONCURRENT",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: `Concurrent position limit (${curRef.maxConcurrentPositions}) reached.`
+        };
       }
 
       // Estimate current exposure and intended order value
@@ -815,7 +839,15 @@ export default function MarketTerminal() {
       if (side === "BUY" && (newExposurePct > (curRef.maxExposurePercentPerSymbol || 100))) {
         addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: post-order exposure ${newExposurePct.toFixed(2)}% would exceed ${curRef.maxExposurePercentPerSymbol}% limit.`, "warn");
         addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: exposure cap exceeded (${newExposurePct.toFixed(2)}%).`, "WARNING");
-        return;
+        return {
+          status: "BLOCKED",
+          code: "BLOCKED_EXPOSURE_CAP",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: `Post-order exposure ${newExposurePct.toFixed(2)}% exceeds cap ${curRef.maxExposurePercentPerSymbol}%.`
+        };
       }
     } catch (e) {
       // if anything fails, do not block trades silently; just log
@@ -825,7 +857,15 @@ export default function MarketTerminal() {
     if (curRef.useAlpacaLive) {
       if (!curRef.isConnected) {
         addAutopilotLog(`Blocked automated order: credentials are disconnected.`, "warn");
-        return;
+        return {
+          status: "BLOCKED",
+          code: "BLOCKED_DISCONNECTED",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: "Live credentials are disconnected."
+        };
       }
 
       let finalQty = qtyNum;
@@ -857,7 +897,15 @@ export default function MarketTerminal() {
               addAutopilotLog(`Leverage Control [SmartAPI]: Rescaling automated BUY of ${symbolClean} from ${qtyNum} to affordable ${finalQty} shares due to cash limit.`, "info");
             } else {
               addAutopilotLog(`Blocked Live automated BUY: Insufficient Cash buffer. Required: ${estimatedCost.toFixed(2)}, available: ${maxAllowedPower.toFixed(2)}.`, "warn");
-              return;
+              return {
+                status: "BLOCKED",
+                code: "BLOCKED_CASH_BUFFER",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: `Insufficient cash buffer. Required ${estimatedCost.toFixed(2)}, available ${maxAllowedPower.toFixed(2)}.`
+              };
             }
           }
         } else {
@@ -865,7 +913,15 @@ export default function MarketTerminal() {
           const ownedQty = existingPos ? existingPos.qty : 0;
           if (ownedQty <= 0) {
             addAutopilotLog(`Blocked automated live SmartAPI SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Angel One short-selling is restricted.`, "warn");
-            return;
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_SHORT_RESTRICTED",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: "Short-selling is restricted for this live account." 
+            };
           }
           if (finalQty > ownedQty) {
             addAutopilotLog(`Leverage Control: Capping automated live SmartAPI SELL from ${qtyNum} to owned size ${ownedQty}.`, "info");
@@ -907,14 +963,30 @@ export default function MarketTerminal() {
               if (finalQty <= (symbolClean === "BTCUSD" ? 0.0005 : 0.05)) {
                 addAutopilotLog(`Blocked live automated BUY: Affordable size ${finalQty} for ${symbolClean} is negligible. BP: ${maxAllowedPower.toFixed(2)} (safe cap: ${maxSafeOrderVal.toFixed(2)}), price: ${estPrice.toFixed(2)}.`, "warn");
                 addLog(symbolClean, "AUTO_BUY_BLOCKED", `Affordable size ${finalQty} is too small to execute. Balance: ${maxAllowedPower.toFixed(2)}.`, "WARNING");
-                return;
+                return {
+                  status: "BLOCKED",
+                  code: "BLOCKED_NEGLIGIBLE_QTY",
+                  symbol: symbolClean,
+                  side,
+                  requestedQty: qtyNum,
+                  executedQty: 0,
+                  message: `Affordable quantity ${finalQty} is too small to execute.`
+                };
               } else {
                 addAutopilotLog(`Leverage Control: Out of buying power / buffer cushion for ${qtyNum} ${symbolClean} (~${estimatedCost.toFixed(2)}). Rescaled down to ${finalQty} (~${(estPrice * finalQty).toFixed(2)}) based on ${maxSafeOrderVal.toFixed(2)} maximum safe order limit (30% buffer).`, "info");
               }
             } else {
               addAutopilotLog(`Blocked live automated BUY: Insufficient buying power buffer. Cost for ${qtyNum} ${symbolClean} is ~${estimatedCost.toFixed(2)} with safe maximum limit of ${maxSafeOrderVal.toFixed(2)} (total BP: ${maxAllowedPower.toFixed(2)}).`, "warn");
               addLog(symbolClean, "AUTO_BUY_BLOCKED", `Insufficient buying power: ${maxAllowedPower.toFixed(2)} available vs ${estimatedCost.toFixed(2)} required.`, "WARNING");
-              return;
+              return {
+                status: "BLOCKED",
+                code: "BLOCKED_BUYING_POWER",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: `Insufficient buying power (${maxAllowedPower.toFixed(2)}) for estimated cost ${estimatedCost.toFixed(2)}.`
+              };
             }
           }
         } else {
@@ -923,7 +995,15 @@ export default function MarketTerminal() {
           if (ownedQty <= 0) {
             addAutopilotLog(`Blocked automated live SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Alpaca short-selling is restricted. Switch to Local Simulator to trade short strategies!`, "warn");
             addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean}.`, "WARNING");
-            return;
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_SHORT_RESTRICTED",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: "Short-selling is restricted for this live account."
+            };
           }
           if (finalQty > ownedQty) {
             addAutopilotLog(`Leverage Control: Capping automated live SELL of ${symbolClean} from ${qtyNum} to owned size ${ownedQty} to prevent unauthorized short-selling.`, "info");
@@ -1003,6 +1083,16 @@ export default function MarketTerminal() {
           }
         }, 1200);
 
+        return {
+          status: "FILLED",
+          code: "FILLED",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: finalQty,
+          message: "Live order filled."
+        };
+
       } catch (err: any) {
         console.error(err);
         let errorMsg = err.message || "Broker block";
@@ -1013,6 +1103,15 @@ export default function MarketTerminal() {
         }
         addAutopilotLog(`Automated Live Order REJECTED: ${errorMsg}`, "warn");
         addLog(symbolClean, `AUTO_${side}_FAILED`, errorMsg, "CRITICAL");
+        return {
+          status: "REJECTED",
+          code: "REJECTED_BROKER",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: errorMsg
+        };
       }
     } else {
       // Offline Simulated execution
@@ -1054,7 +1153,15 @@ export default function MarketTerminal() {
         if (totalDebitWithFees > curRef.simCash) {
           addAutopilotLog(`Blocked automated simulation: Insufficient sim balance. Needs ${currencySymbol}${totalDebitWithFees.toFixed(2)} (including ${currencySymbol}${orderFees.toFixed(2)} fees/taxes).`, "warn");
           addLog(symbolClean, "AUTO_BUY_SIM_FAILED", `Simulated cash reserves exhausted. Needs ${currencySymbol}${totalDebitWithFees.toFixed(2)} to cover order & fees.`, "WARNING");
-          return;
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_CASH_BUFFER",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: `Insufficient simulated cash. Needed ${currencySymbol}${totalDebitWithFees.toFixed(2)}.`
+          };
         }
         setSimCash((c) => c - totalDebitWithFees);
         setMockPositions((prev) => {
@@ -1186,8 +1293,68 @@ export default function MarketTerminal() {
         },
         ...prev,
       ]);
+
+      return {
+        status: "FILLED",
+        code: "FILLED",
+        symbol: symbolClean,
+        side,
+        requestedQty: qtyNum,
+        executedQty: qtyNum,
+        message: "Simulated order filled."
+      };
     }
   }, [addAutopilotLog, addLog]);
+
+  const logScanOrderOutcome = useCallback((source: string, outcome: AutopilotOrderResult) => {
+    const qtyText = outcome.executedQty > 0 ? outcome.executedQty : outcome.requestedQty;
+    if (outcome.status === "FILLED") {
+      addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${qtyText} ${outcome.symbol} (${outcome.code}).`, "success");
+    } else if (outcome.status === "BLOCKED") {
+      addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${outcome.requestedQty} ${outcome.symbol} (${outcome.code}) - ${outcome.message}`, "warn");
+    } else {
+      addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${outcome.requestedQty} ${outcome.symbol} (${outcome.code}) - ${outcome.message}`, "warn");
+    }
+  }, [addAutopilotLog]);
+
+  // Immediate deleverage command callable from UI
+  const performDeleverage = useCallback(async () => {
+    const curRef = stateRef.current;
+    addAutopilotLog(`Manual deleverage requested. Evaluating exposures...`, "info");
+
+    const currentActivePositions: Position[] = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
+    if (!currentActivePositions || currentActivePositions.length === 0) {
+      addAutopilotLog("Nothing to deleverage: no active positions.", "warn");
+      return;
+    }
+
+    const highestExposure = [...currentActivePositions].sort((a, b) => {
+      const aCost = a.current_price * Math.abs(a.qty) * a.maintenance_margin_rate;
+      const bCost = b.current_price * Math.abs(b.qty) * b.maintenance_margin_rate;
+      return bCost - aCost;
+    })[0];
+
+    if (!highestExposure) {
+      addAutopilotLog("No exposures found for deleveraging.", "warn");
+      return;
+    }
+
+    const qtyAbs = Math.abs(highestExposure.qty);
+    const rawQty = Math.max(1, Math.round(qtyAbs * (curRef.aggressiveDeleverage ? 0.5 : 0.2)) || 1);
+
+    if (highestExposure.qty > 0) {
+      addAutopilotLog(`Manual deleverage: selling ${rawQty} of ${highestExposure.symbol}.`, "warn");
+      await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
+      setToast({ message: `Sold ${rawQty} ${highestExposure.symbol}`, level: "success" });
+    } else {
+      addAutopilotLog(`Manual deleverage: buying ${rawQty} to cover short ${highestExposure.symbol}.`, "warn");
+      await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
+      setToast({ message: `Covered ${rawQty} ${highestExposure.symbol}`, level: "success" });
+    }
+
+    // auto-clear toast after 4 seconds
+    setTimeout(() => setToast(null), 4000);
+  }, [executeAutopilotOrder, addAutopilotLog]);
 
   const executeAutopilotScan = useCallback(async () => {
     const curRef = stateRef.current;
@@ -1228,10 +1395,12 @@ export default function MarketTerminal() {
             
             if (highestExposure.qty > 0) {
               addAutopilotLog(`Triggered auto-deleveraging order to sell ${rawQty} of high-beta long asset ${highestExposure.symbol}.`, "warn");
-              await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
+              const orderOutcome = await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
+              logScanOrderOutcome("SENTRY_HEAL", orderOutcome);
             } else {
               addAutopilotLog(`Triggered auto-deleveraging order to cover ${rawQty} of high-beta short asset ${highestExposure.symbol}.`, "warn");
-              await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
+              const orderOutcome = await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
+              logScanOrderOutcome("SENTRY_HEAL", orderOutcome);
             }
           }
         } else {
@@ -1257,14 +1426,16 @@ export default function MarketTerminal() {
         const randSeed = Math.random();
         if (randSeed > 0.55) {
           const buyQty = targetSymbol === "BTCUSD" ? 0.02 : 5;
-          addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) is dipping below support. Buying units.`, "trade");
-          await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
+          addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) is dipping below support. Attempting BUY order.`, "trade");
+          const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
+          logScanOrderOutcome("SCALPER", orderOutcome);
         } else if (randSeed < 0.25) {
           const exists = currentActivePositions.find((p) => p.symbol === targetSymbol);
           if (exists && exists.qty >= (targetSymbol === "BTCUSD" ? 0.02 : 2)) {
             const sellQty = targetSymbol === "BTCUSD" ? 0.02 : Math.min(exists.qty, 5);
-            addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) hit local resistance spike. Profit harvesting.`, "trade");
-            await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
+            addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) hit local resistance spike. Attempting SELL order.`, "trade");
+            const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
+            logScanOrderOutcome("SCALPER", orderOutcome);
           } else {
             addAutopilotLog(`Scalper Signals: Selling sign emitted but zero inventory of ticker ${targetSymbol} exists.`, "info");
           }
@@ -2014,7 +2185,8 @@ export default function MarketTerminal() {
         if (data.action === "BUY") {
           addAutopilotLog(`🤖 AI Decision: BUY recommended for ${targetSymbol}. Reason: "${data.reason}"`, "trade");
           const buyQty = targetSymbol === "BTCUSD" ? 0.02 : data.qty || 5;
-          await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
+          const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
+          logScanOrderOutcome("GEMINI_AI", orderOutcome);
         } else if (data.action === "SELL") {
           addAutopilotLog(`🤖 AI Decision: SELL recommended for ${targetSymbol}. Reason: "${data.reason}"`, "trade");
           const sellQty = targetSymbol === "BTCUSD" ? 0.02 : data.qty || 5;
@@ -2022,7 +2194,8 @@ export default function MarketTerminal() {
           if (!exists) {
             addAutopilotLog(`🤖 AI Posture: Initiating new short exposure of ${sellQty} ${targetSymbol}.`, "trade");
           }
-          await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
+          const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
+          logScanOrderOutcome("GEMINI_AI", orderOutcome);
         } else {
           addAutopilotLog(`🤖 AI Decision: HOLD recommended for ${targetSymbol}. Reason: "${data.reason}"`, "success");
         }
@@ -2033,21 +2206,36 @@ export default function MarketTerminal() {
     } finally {
       setIsAutopilotRunning(false);
     }
-  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog]);
+  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog, logScanOrderOutcome]);
 
   // Autopilot loop trigger
   useEffect(() => {
     let intervalId: NodeJS.Timeout | null = null;
+    const prevActive = prevAutopilotActiveRef.current;
+
+    if (prevActive === null) {
+      if (isAutopilotActive) {
+        addAutopilotLog(`🔴 Sentry Autopilot trading system ACTIVATED!`, "info");
+      }
+    } else if (prevActive !== isAutopilotActive) {
+      addAutopilotLog(
+        isAutopilotActive
+          ? `🔴 Sentry Autopilot trading system ACTIVATED!`
+          : `🟢 Sentry Autopilot trading system DEACTIVATED. Intercept loops idle.`,
+        "info"
+      );
+    }
+
+    prevAutopilotActiveRef.current = isAutopilotActive;
+
     if (isAutopilotActive) {
-      addAutopilotLog(`🔴 Sentry Autopilot trading system ACTIVATED!`, "info");
       executeAutopilotScan();
       
       intervalId = setInterval(() => {
         executeAutopilotScan();
       }, autopilotInterval * 1000);
-    } else {
-      addAutopilotLog(`🟢 Sentry Autopilot trading system DEACTIVATED. Intercept loops idle.`, "info");
     }
+
     return () => {
       if (intervalId) clearInterval(intervalId);
     };
