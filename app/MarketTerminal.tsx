@@ -79,6 +79,7 @@ interface Log {
 type AutopilotOrderOutcomeCode =
   | "FILLED"
   | "PENDING_BROKER_ACCEPTED"
+  | "BLOCKED_BUY_COOLDOWN"
   | "INVALID_QTY"
   | "BLOCKED_BLACKLIST"
   | "BLOCKED_LOSS_GUARD"
@@ -593,6 +594,7 @@ export default function MarketTerminal() {
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
   const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
+  const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
   const autopilotTargetSymbolIndexRef = useRef(0);
 
   // Refresh data proxy
@@ -777,6 +779,22 @@ export default function MarketTerminal() {
       };
     }
     symbolClean = symbolClean.toUpperCase().trim();
+
+    if (side === "BUY") {
+      const cooldownUntil = autopilotBuyCooldownUntilRef.current[symbolClean] || 0;
+      if (cooldownUntil > Date.now()) {
+        const secLeft = Math.ceil((cooldownUntil - Date.now()) / 1000);
+        return {
+          status: "BLOCKED",
+          code: "BLOCKED_BUY_COOLDOWN",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: `BUY cooldown active for ${symbolClean} (${secLeft}s remaining) after prior buying-power rejection.`
+        };
+      }
+    }
 
     // Automated Blacklist Intercept Check (e.g. to avoid trading low-winrate or banned symbols like TSLA in Autopilot entirely)
     if (curRef.autopilotBlacklist?.includes(symbolClean)) {
@@ -1181,6 +1199,12 @@ export default function MarketTerminal() {
           autopilotPendingBuySymbolsRef.current.delete(symbolClean);
         }
         let errorMsg = err.message || "Broker block";
+        const rawErrorMsg = String(errorMsg || "").toLowerCase();
+        if (side === "BUY" && rawErrorMsg.includes("insufficient buying power")) {
+          const cooldownMs = 3 * 60 * 1000;
+          autopilotBuyCooldownUntilRef.current[symbolClean] = Date.now() + cooldownMs;
+          addAutopilotLog(`BUY cooldown armed for ${symbolClean}: pausing retries for 180s after buying-power rejection.`, "info");
+        }
         if (errorMsg.includes("is not allowed to short") || errorMsg.includes("shorting")) {
           errorMsg = "Account is not allowed to short. Standard Alpaca Cash and non-margin accounts cannot short-sell. Swap to Local Risk Simulator to fully trade short strategies!";
         } else if (errorMsg.includes("insufficient buying power")) {
