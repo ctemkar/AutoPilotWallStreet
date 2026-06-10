@@ -207,44 +207,7 @@ export default function MarketTerminal() {
     };
   }, []);
 
-  // Immediate deleverage command callable from UI
-  const performDeleverage = useCallback(async () => {
-    const curRef = stateRef.current;
-    addAutopilotLog(`Manual deleverage requested. Evaluating exposures...`, "info");
   
-    const currentActivePositions: Position[] = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
-    if (!currentActivePositions || currentActivePositions.length === 0) {
-      addAutopilotLog("Nothing to deleverage: no active positions.", "warn");
-      return;
-    }
-  
-    const highestExposure = [...currentActivePositions].sort((a, b) => {
-      const aCost = a.current_price * Math.abs(a.qty) * a.maintenance_margin_rate;
-      const bCost = b.current_price * Math.abs(b.qty) * b.maintenance_margin_rate;
-      return bCost - aCost;
-    })[0];
-  
-    if (!highestExposure) {
-      addAutopilotLog("No exposures found for deleveraging.", "warn");
-      return;
-    }
-  
-    const qtyAbs = Math.abs(highestExposure.qty);
-    const rawQty = Math.max(1, Math.round(qtyAbs * (curRef.aggressiveDeleverage ? 0.5 : 0.2)) || 1);
-  
-    if (highestExposure.qty > 0) {
-      addAutopilotLog(`Manual deleverage: selling ${rawQty} of ${highestExposure.symbol}.`, "warn");
-      await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
-      setToast({ message: `Sold ${rawQty} ${highestExposure.symbol}`, level: "success" });
-    } else {
-      addAutopilotLog(`Manual deleverage: buying ${rawQty} to cover short ${highestExposure.symbol}.`, "warn");
-      await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
-      setToast({ message: `Covered ${rawQty} ${highestExposure.symbol}`, level: "success" });
-    }
-
-    // auto-clear toast after 4 seconds
-    setTimeout(() => setToast(null), 4000);
-  }, [executeAutopilotOrder, addAutopilotLog]);
 
   // Alpaca States API key configuration
   const [apiKey, setApiKey] = useState("");
@@ -419,6 +382,18 @@ export default function MarketTerminal() {
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(6); // concurrent open positions
   const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
 
+  const addAutopilotLog = useCallback((msg: string, type: "info" | "success" | "warn" | "trade") => {
+    setAutopilotLogs((prev) => {
+      const newLog = {
+        id: `ap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        time: new Date().toLocaleTimeString(),
+        msg,
+        type
+      };
+      return [newLog, ...prev].slice(0, 50);
+    });
+  }, []);
+
   // Load persisted global TP/SL from localStorage on mount
   useEffect(() => {
     try {
@@ -430,6 +405,45 @@ export default function MarketTerminal() {
       // ignore
     }
   }, [addAutopilotLog, addLog]);
+
+  // Immediate deleverage command callable from UI (moved here to avoid TDZ)
+  const performDeleverage = useCallback(async () => {
+    const curRef = stateRef.current;
+    addAutopilotLog(`Manual deleverage requested. Evaluating exposures...`, "info");
+
+    const currentActivePositions: Position[] = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
+    if (!currentActivePositions || currentActivePositions.length === 0) {
+      addAutopilotLog("Nothing to deleverage: no active positions.", "warn");
+      return;
+    }
+
+    const highestExposure = [...currentActivePositions].sort((a, b) => {
+      const aCost = a.current_price * Math.abs(a.qty) * a.maintenance_margin_rate;
+      const bCost = b.current_price * Math.abs(b.qty) * b.maintenance_margin_rate;
+      return bCost - aCost;
+    })[0];
+
+    if (!highestExposure) {
+      addAutopilotLog("No exposures found for deleveraging.", "warn");
+      return;
+    }
+
+    const qtyAbs = Math.abs(highestExposure.qty);
+    const rawQty = Math.max(1, Math.round(qtyAbs * (curRef.aggressiveDeleverage ? 0.5 : 0.2)) || 1);
+
+    if (highestExposure.qty > 0) {
+      addAutopilotLog(`Manual deleverage: selling ${rawQty} of ${highestExposure.symbol}.`, "warn");
+      await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
+      setToast({ message: `Sold ${rawQty} ${highestExposure.symbol}`, level: "success" });
+    } else {
+      addAutopilotLog(`Manual deleverage: buying ${rawQty} to cover short ${highestExposure.symbol}.`, "warn");
+      await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
+      setToast({ message: `Covered ${rawQty} ${highestExposure.symbol}`, level: "success" });
+    }
+
+    // auto-clear toast after 4 seconds
+    setTimeout(() => setToast(null), 4000);
+  }, [executeAutopilotOrder, addAutopilotLog]);
 
   // Persist TP/SL whenever they change
   useEffect(() => {
@@ -719,15 +733,7 @@ export default function MarketTerminal() {
     autopilotBlacklist
   ]);
 
-  const addAutopilotLog = useCallback((msg: string, type: "info" | "success" | "warn" | "trade") => {
-    const newLog = {
-      id: `ap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-      time: new Date().toLocaleTimeString(),
-      msg,
-      type
-    };
-    setAutopilotLogs((prev) => [newLog, ...prev].slice(0, 50));
-  }, []);
+  // (moved) addAutopilotLog is hoisted above to avoid TDZ issues
 
   const executeAutopilotOrder = useCallback(async (symbolClean: string, side: "BUY" | "SELL", qtyNum: number) => {
     const curRef = stateRef.current;
