@@ -870,6 +870,7 @@ export default function MarketTerminal() {
   const autopilotPendingBuyMetaRef = useRef<Record<string, { baseQty: number; submittedQty: number; submittedAt: number }>>({});
   const autopilotLossGuardBlockedUntilRef = useRef<Record<string, number>>({});
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
+  const insufficientUsdtCooldownRef = useRef<number>(0);
   const lastAutoLiquidationDayRef = useRef<string | null>(null);
   const orderMutexRef = useRef<AsyncMutex>(new AsyncMutex());
   const autopilotTargetSymbolIndexRef = useRef(0);
@@ -1697,7 +1698,27 @@ export default function MarketTerminal() {
         }
 
         if (!response.ok || dataOrder?.error) {
-          throw new Error(dataOrder?.error || "Brokerage error response");
+          const errMsg = dataOrder?.error || "Brokerage error response";
+          // If Binance reports insufficient USDT, surface a UI warning and throttle repeated logs.
+          if (/insufficient\s+usdt/i.test(errMsg) || /insufficient\s+preferred\s+usdt/i.test(errMsg) || /insufficient.*usdt/i.test(errMsg)) {
+            const now = Date.now();
+            if ((insufficientUsdtCooldownRef.current || 0) < now) {
+              addAutopilotLog(`Blocked automated BUY: ${errMsg}`, "warn");
+              // also expose as the last order outcome so UI can show it briefly
+              setLastAutopilotOrderOutcome({ status: "BLOCKED", code: "BLOCKED_INSUFFICIENT_USDT", symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: errMsg });
+              insufficientUsdtCooldownRef.current = now + 60 * 1000; // 60s cooldown
+            }
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_INSUFFICIENT_USDT",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: errMsg
+            };
+          }
+          throw new Error(errMsg);
         }
 
         const brokerStatus = String(dataOrder.status || "ACCEPTED").toUpperCase();
