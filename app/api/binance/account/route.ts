@@ -1,0 +1,43 @@
+import { NextResponse } from "next/server";
+import crypto from "crypto";
+
+export const dynamic = "force-dynamic";
+
+function sign(query: string, secret: string) {
+  return crypto.createHmac("sha256", secret).update(query).digest("hex");
+}
+
+export async function GET(req: Request) {
+  try {
+    const apiKey = process.env.BINANCE_LIVE_API_KEY;
+    const apiSecret = process.env.BINANCE_LIVE_API_SECRET;
+    if (!apiKey || !apiSecret) {
+      return NextResponse.json({ error: "BINANCE API credentials missing on server." }, { status: 200 });
+    }
+
+    const params: any = { timestamp: Date.now(), recvWindow: 5000 };
+    const qs = new URLSearchParams();
+    Object.keys(params).forEach((k) => qs.set(k, String(params[k])));
+    const queryString = qs.toString();
+    const signature = sign(queryString, apiSecret);
+
+    const res = await fetch(`https://api.binance.com/api/v3/account?${queryString}&signature=${signature}`, {
+      method: 'GET',
+      headers: { 'X-MBX-APIKEY': apiKey },
+      cache: 'no-store'
+    });
+
+    const txt = await res.text();
+    let data: any = null;
+    try { data = JSON.parse(txt); } catch (e) { return NextResponse.json({ error: `Binance returned non-JSON: ${txt.slice(0,200)}` }, { status: 200 }); }
+
+    if (!res.ok) {
+      return NextResponse.json({ error: data?.msg || 'Binance account query rejected', raw: data }, { status: 200 });
+    }
+
+    return NextResponse.json({ account: data });
+  } catch (err: any) {
+    console.error('Binance account proxy error', err);
+    return NextResponse.json({ error: err?.message || 'Internal server error' }, { status: 200 });
+  }
+}

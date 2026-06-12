@@ -882,13 +882,13 @@ export default function MarketTerminal() {
     let u = String(s).toUpperCase().trim();
     // strip non-alphanumeric characters
     u = u.replace(/[^A-Z0-9]/g, "");
-    // if bare token like "ETH", assume USD pair
+    // if bare token like "ETH", prefer USDT pair for crypto
     if (/^[A-Z]{2,5}$/.test(u) && !u.endsWith("USD") && !u.endsWith("USDT")) {
-      return `${u}USD`;
+      return `${u}USDT`;
     }
-    // common typo: trailing single 'D' (e.g. ETHd) -> USD
+    // common typo: trailing single 'D' (e.g. ETHd) -> USDT
     if (u.endsWith("D") && !u.endsWith("USD") && u.length > 1) {
-      return `${u.slice(0, -1)}USD`;
+      return `${u.slice(0, -1)}USDT`;
     }
     return u;
   }, []);
@@ -3744,16 +3744,31 @@ export default function MarketTerminal() {
           return;
         }
 
-        addLog("GEMINI", side, `Transmitting Crypto Order to Gemini: ${side} ${qtyNum} ${symbolClean} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
+        addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${normSymbol} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
         try {
-          // buying-power check for manual crypto orders
+          // buying-power check for manual crypto orders — prefer Binance futures USDT when available, fallback to local Alpaca buying power
           const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
           const intendedCost = estPrice * parseFloat(qtyNum.toFixed(6));
-          const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-          const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
-          const isFractional = qtyNum % 1 !== 0;
-          const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-          const maxSafeOrderVal = maxAllowedPower * 0.7;
+          let maxSafeOrderVal = 0;
+          try {
+            const prefRes = await fetch('/api/binance/preferred-usdt');
+            const pref = await prefRes.json();
+            const prefUsdt = parseFloat(pref?.usdt || 0);
+            if (prefUsdt > 0) {
+              maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
+            }
+          } catch (e) {
+            // ignore and fallback
+          }
+
+          if (maxSafeOrderVal <= 0) {
+            const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+            const isFractional = qtyNum % 1 !== 0;
+            const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+            maxSafeOrderVal = maxAllowedPower * 0.7;
+          }
+
           if (intendedCost > maxSafeOrderVal) {
             setIsPlacingOrder(false);
             setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
@@ -3770,7 +3785,7 @@ export default function MarketTerminal() {
             openShort: attemptingOpenShort && allowLiveShorts,
           };
 
-          const response = await fetch("/api/gemini/trade", {
+          const response = await fetch("/api/binance/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -3831,14 +3846,27 @@ export default function MarketTerminal() {
 
           addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${normSymbol} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
           try {
-            // buying-power check for manual crypto orders (Binance)
+            // buying-power check for manual crypto orders (Binance) — prefer futures USDT via server
             const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
             const intendedCost = estPrice * parseFloat(qtyNum.toFixed(6));
-            const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
-            const isFractional = qtyNum % 1 !== 0;
-            const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-            const maxSafeOrderVal = maxAllowedPower * 0.7;
+            let maxSafeOrderVal = 0;
+            try {
+              const prefRes = await fetch('/api/binance/preferred-usdt');
+              const pref = await prefRes.json();
+              const prefUsdt = parseFloat(pref?.usdt || 0);
+              if (prefUsdt > 0) {
+                maxSafeOrderVal = prefUsdt * 0.9;
+              }
+            } catch (e) {
+              // ignore
+            }
+            if (maxSafeOrderVal <= 0) {
+              const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+              const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+              const isFractional = qtyNum % 1 !== 0;
+              const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+              maxSafeOrderVal = maxAllowedPower * 0.7;
+            }
             if (intendedCost > maxSafeOrderVal) {
               setIsPlacingOrder(false);
               setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
@@ -3925,6 +3953,7 @@ export default function MarketTerminal() {
 
         addLog("ANGELONE", side, `Transmitting Order: ${side} for ${qtyNum} share(s) of ${symbolClean} on NSE`, "INFO");
         try {
+          const isMockConn = isPaper || !angelApiKey || !angelClientCode;
           const response = await fetch("/api/angelone/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -3936,7 +3965,7 @@ export default function MarketTerminal() {
               symbol: symbolClean,
               qty: qtyNum,
               side: side.toLowerCase(),
-              isMockConnection: false
+              isMockConnection: isMockConn
             }),
           });
 
@@ -4884,6 +4913,26 @@ if __name__ == "__main__":
           />
           <span className="text-xs">Auto-switch to crypto-only outside Wall Street hours</span>
         </label>
+      </div>
+      {/* Broker selector: Alpaca or AngelOne (paper mode supported) */}
+      <div className="mb-4 flex items-center gap-3">
+        <label className="text-sm">Broker:</label>
+        <select
+          value={brokerType}
+          onChange={(e) => {
+            const v = e.target.value as "ALPACA" | "ANGELONE";
+            setBrokerType(v);
+            try { if (typeof window !== 'undefined') localStorage.setItem('RISK_SENTRY_BROKER_TYPE', v); } catch (e) {}
+            addLog('SYSTEM', 'BROKER_SWITCH', `Broker switched to ${v}`, 'INFO');
+          }}
+          className="text-sm px-2 py-1 rounded bg-brand-input"
+        >
+          <option value="ALPACA">Alpaca (US)</option>
+          <option value="ANGELONE">AngelOne (India)</option>
+        </select>
+        {brokerType === 'ANGELONE' && (
+          <div className="text-xs text-muted">Paper mode supported; missing AngelOne keys will use simulator.</div>
+        )}
       </div>
       {/* Confirmation Modal */}
       {confirmModalOpen && (
