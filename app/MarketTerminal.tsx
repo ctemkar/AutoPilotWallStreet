@@ -3488,6 +3488,27 @@ export default function MarketTerminal() {
         body: JSON.stringify(payload),
       });
 
+      // Restore autopilot strategy from localStorage if present
+      useEffect(() => {
+        try {
+          const savedStrategy = localStorage.getItem("AUTOPILOT_STRATEGY");
+          if (savedStrategy) {
+            setAutopilotStrategy(savedStrategy as any);
+          }
+        } catch (e) {
+          // ignore
+        }
+      }, []);
+
+      // Persist autopilot strategy whenever it changes
+      useEffect(() => {
+        try {
+          localStorage.setItem("AUTOPILOT_STRATEGY", autopilotStrategy);
+        } catch (e) {
+          // ignore
+        }
+      }, [autopilotStrategy]);
+
       const resText = await response.text();
       let rawData: any = null;
       try {
