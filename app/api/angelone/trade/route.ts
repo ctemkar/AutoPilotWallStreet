@@ -134,15 +134,13 @@ export async function POST(req: Request) {
       })
     });
 
-    // If login failed or returned non-JSON (HTML/error page), capture details for debugging
+    // Read response as text once and reuse to avoid "body already read" errors.
+    const loginText = await loginRes.text();
     if (!loginRes.ok) {
-      const bodyText = await loginRes.text();
-      const snippet = bodyText.slice(0, 1024);
+      const snippet = loginText.slice(0, 1024);
       throw new Error(`Login HTTP ${loginRes.status} ${loginRes.statusText}: ${snippet}`);
     }
 
-    // Read response as text first and parse JSON to avoid body/clone issues
-    const loginText = await loginRes.text();
     let loginData: any = null;
     try {
       loginData = JSON.parse(loginText);
@@ -193,13 +191,14 @@ export async function POST(req: Request) {
       headers: secureHeaders,
       body: JSON.stringify(orderPayload)
     });
+
+    // Read order response once to avoid double-read/clone failures and provide safe diagnostics
+    const orderText = await orderResponse.text();
     if (!orderResponse.ok) {
-      const bodyText = await orderResponse.text();
-      const snippet = bodyText.slice(0, 2048);
+      const snippet = orderText.slice(0, 2048);
       throw new Error(`Order HTTP ${orderResponse.status} ${orderResponse.statusText}: ${snippet}`);
     }
 
-    const orderText = await orderResponse.text();
     let orderData: any = null;
     try {
       orderData = JSON.parse(orderText);

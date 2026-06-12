@@ -116,25 +116,8 @@ function PositionSparkline({ symbol, currentPl, totalCost }: { symbol: string; c
   }, []);
 
   // Restore autopilot strategy from localStorage if present
-  useEffect(() => {
-    try {
-      const savedStrategy = localStorage.getItem("AUTOPILOT_STRATEGY");
-      if (savedStrategy) {
-        setAutopilotStrategy(savedStrategy as any);
-      }
-    } catch (e) {
-      // ignore
-    }
-  }, []);
-
-  // Persist autopilot strategy whenever it changes
-  useEffect(() => {
-    try {
-      localStorage.setItem("AUTOPILOT_STRATEGY", autopilotStrategy);
-    } catch (e) {
-      // ignore
-    }
-  }, [autopilotStrategy]);
+  // Position sparkline is purely presentational; persistence of autopilot
+  // strategy is handled at the MarketTerminal component level.
 
   // Generate initial 24h history leading up to the current P/L
   useEffect(() => {
@@ -389,6 +372,8 @@ export default function MarketTerminal() {
   // AI Stress Diagnosis state
   const [aiAnalysis, setAiAnalysis] = useState("");
   const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiAnalysisGeneratedAt, setAiAnalysisGeneratedAt] = useState<number | null>(null);
+  const [aiAnalysisSnapshot, setAiAnalysisSnapshot] = useState<{ equity: number; cash: number; positions: number } | null>(null);
 
   // Portfolio Liquidation Action States
   const [isLiquidating, setIsLiquidating] = useState<string | null>(null);
@@ -506,7 +491,7 @@ export default function MarketTerminal() {
     lastCandleAction: string;
   }>>({});
 
-  const [autopilotInterval, setAutopilotInterval] = useState(5); // in seconds
+  const [autopilotInterval, setAutopilotInterval] = useState(15); // in seconds (default increased to reduce API load and false signals)
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
   const [autopilotCryptoOnly, setAutopilotCryptoOnly] = useState<boolean>(false);
@@ -574,10 +559,21 @@ export default function MarketTerminal() {
       }
       const autoSwitchRaw = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotAutoSwitchEnabled");
       if (autoSwitchRaw) setAutopilotAutoSwitchEnabled(autoSwitchRaw === "true");
+      const savedInterval = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotInterval");
+      if (savedInterval) setAutopilotInterval(Math.max(1, parseInt(savedInterval)));
     } catch (e) {
       // ignore
     }
   }, [addAutopilotLog, addLog]);
+
+  // Persist autopilot interval when it changes
+  useEffect(() => {
+    try {
+      if (typeof window !== "undefined") {
+        localStorage.setItem("sentry:autopilotInterval", String(autopilotInterval));
+      }
+    } catch (e) {}
+  }, [autopilotInterval]);
 
   // Persist TP/SL whenever they change
   useEffect(() => {
@@ -602,7 +598,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:positionsView", positionsView);
       }
     } catch (e) {}
-  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets]);
+  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin]);
 
   // Automatic ET-based toggle: after Wall Street close (16:00 ET) prefer crypto-only autopilot,
   // and re-enable non-crypto before market open (9:30 ET). Skip automatic toggles on weekends.
@@ -903,14 +899,6 @@ export default function MarketTerminal() {
     return false;
   }, []);
 
-  const computeOpenCounts = useCallback((positions: any[]) => {
-    const all = (positions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
-    const crypto = (positions || []).filter((p: any) => {
-      try { return parseFloat(p.qty || 0) > 0 && isCryptoSymbol(String(p.symbol || "")); } catch (e) { return false; }
-    }).length;
-    return { all, crypto };
-  }, []);
-
   const isCryptoSymbol = useCallback((s: string) => {
     if (!s) return false;
     const u = String(s).toUpperCase().trim();
@@ -920,6 +908,14 @@ export default function MarketTerminal() {
     if (explicit.includes(u)) return true;
     return false;
   }, []);
+
+  const computeOpenCounts = useCallback((positions: any[]) => {
+    const all = (positions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
+    const crypto = (positions || []).filter((p: any) => {
+      try { return parseFloat(p.qty || 0) > 0 && isCryptoSymbol(String(p.symbol || "")); } catch (e) { return false; }
+    }).length;
+    return { all, crypto };
+  }, [isCryptoSymbol]);
 
   // Normalize symbol to exchange-friendly form (e.g. ETH -> ETHUSD, ETHd -> ETHUSD)
   const normalizeSymbol = useCallback((s: string) => {
@@ -1072,7 +1068,7 @@ export default function MarketTerminal() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [useAlpacaLive, brokerType, angelApiKey, angelClientCode, angelMpin, angelTotpSeed, apiKey, apiSecret, isPaper, addLog]);
+  }, [useAlpacaLive, brokerType, angelApiKey, angelClientCode, angelMpin, angelTotpSeed, apiKey, apiSecret, isPaper, angelUseServerCreds, addLog]);
 
   // Stable state ref to bypass interval recreate throttling
   const stateRef = React.useRef<any>({
@@ -1153,6 +1149,7 @@ export default function MarketTerminal() {
   }, [
     useAlpacaLive,
     allowLiveShorts,
+    positionsView,
     alpacaPositions,
     mockPositions,
     simCash,
@@ -2157,7 +2154,7 @@ export default function MarketTerminal() {
         }
       }
     }
-  }, [addAutopilotLog, addLog, armLiquidationCooldown, isLossMakingPosition]);
+  }, [addAutopilotLog, addLog, armLiquidationCooldown, isLossMakingPosition, computeOpenCounts, isCryptoSymbol, normalizeSymbol]);
 
   const logScanOrderOutcome = useCallback((source: string, outcome: AutopilotOrderResult) => {
     setLastAutopilotOrderOutcome(outcome);
@@ -3196,7 +3193,7 @@ export default function MarketTerminal() {
     } finally {
       setIsAutopilotRunning(false);
     }
-  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog, logScanOrderOutcome, quickTickers, autopilotInterval, autopilotScanBroadUniverse]);
+  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, setElliottState, addAutopilotLog, logScanOrderOutcome, quickTickers, autopilotInterval, autopilotScanBroadUniverse]);
 
   useEffect(() => {
     if (!isAutopilotActive) {
@@ -3579,7 +3576,7 @@ export default function MarketTerminal() {
     };
 
     initApp();
-  }, []);
+  }, [addLog]);
 
   // (moved) addLog hoisted earlier
 
@@ -3833,7 +3830,7 @@ export default function MarketTerminal() {
     checkAndLiquidate();
     timer = setInterval(checkAndLiquidate, 30000);
     return () => { if (timer) clearInterval(timer); };
-  }, [autoLiquidateBeforeClose, liquidationBeforeCloseMin, executeAutopilotOrder, addLog, addAutopilotLog]);
+  }, [autoLiquidateBeforeClose, liquidationBeforeCloseMin, executeAutopilotOrder, addLog, addAutopilotLog, isCryptoSymbol]);
 
   // Handle Order Placement
   const handleSubmitOrder = async (side: "BUY" | "SELL") => {
@@ -4984,6 +4981,8 @@ if __name__ == "__main__":
   const runAIPortfolioDiagnosis = async () => {
     setIsAiLoading(true);
     setAiAnalysis("");
+    setAiAnalysisGeneratedAt(null);
+    setAiAnalysisSnapshot(null);
     addLog("GEMINI", "DIAGNOSE_REQUEST", "Starting AI margin downside shock diagnostics...", "INFO");
 
     try {
@@ -5012,6 +5011,12 @@ if __name__ == "__main__":
       }
 
       setAiAnalysis(resultData.diagnosis);
+      setAiAnalysisGeneratedAt(Date.now());
+      setAiAnalysisSnapshot({
+        equity: totalEquity,
+        cash: activeCash,
+        positions: activePositions.length,
+      });
       addLog("GEMINI", "DIAGNOSE_SUCCESS", "AI Stress diagnosis compiled successfully.", "SUCCESS");
     } catch (err: any) {
       console.error(err);
@@ -5021,6 +5026,16 @@ if __name__ == "__main__":
       setIsAiLoading(false);
     }
   };
+
+  const aiReportAgeMin = aiAnalysisGeneratedAt ? Math.floor((Date.now() - aiAnalysisGeneratedAt) / 60000) : null;
+  const aiReportStale = aiReportAgeMin !== null && aiReportAgeMin >= 5;
+  const aiSnapshotDelta = aiAnalysisSnapshot
+    ? {
+        equityDelta: totalEquity - aiAnalysisSnapshot.equity,
+        cashDelta: activeCash - aiAnalysisSnapshot.cash,
+        positionsDelta: activePositions.length - aiAnalysisSnapshot.positions,
+      }
+    : null;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 bg-brand-bg md:p-8" id="root-container">
@@ -5798,12 +5813,29 @@ if __name__ == "__main__":
             </div>
           </div>
 
-          <div className="pt-4 border-t border-brand-border/60 flex items-center justify-between text-xs text-gray-400 font-mono" id="ai-footer-diagnostics">
-            <span>Model: gemini-3.5-flash</span>
-            <span className="flex items-center gap-1 text-brand-green font-bold">
-              <span className="h-1.5 w-1.5 rounded-full bg-brand-green animate-ping" />
-              Sentry Stress Engine Active
-            </span>
+          <div className="pt-4 border-t border-brand-border/60 space-y-2" id="ai-footer-diagnostics">
+            <div className="flex items-center justify-between text-xs text-gray-400 font-mono">
+              <span>Model: gemini-3.5-flash</span>
+              <span className="flex items-center gap-1 text-brand-green font-bold">
+                <span className="h-1.5 w-1.5 rounded-full bg-brand-green animate-ping" />
+                Sentry Stress Engine Active
+              </span>
+            </div>
+            {aiAnalysis && aiAnalysisGeneratedAt && (
+              <div className={`text-[11px] font-mono rounded border px-2 py-1 ${aiReportStale ? "bg-amber-950/30 border-amber-500/40 text-amber-300" : "bg-emerald-950/20 border-brand-green/40 text-brand-green"}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <span>{aiReportStale ? "Report stale" : "Report fresh"}</span>
+                  <span>
+                    Generated {new Date(aiAnalysisGeneratedAt).toLocaleTimeString()} ({aiReportAgeMin ?? 0}m ago)
+                  </span>
+                </div>
+                {aiSnapshotDelta && (
+                  <div className="mt-1 text-[10px] text-gray-300">
+                    Snapshot drift since report: Equity {aiSnapshotDelta.equityDelta >= 0 ? "+" : ""}{aiSnapshotDelta.equityDelta.toFixed(2)}, Cash {aiSnapshotDelta.cashDelta >= 0 ? "+" : ""}{aiSnapshotDelta.cashDelta.toFixed(2)}, Positions {aiSnapshotDelta.positionsDelta >= 0 ? "+" : ""}{aiSnapshotDelta.positionsDelta}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </section>
