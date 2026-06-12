@@ -27,7 +27,10 @@ function isExtendedUsSession(etNow: Date): boolean {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { apiKey, apiSecret, isPaper, symbol, qty, side, notional, estimatedPrice } = body;
+    // Prefer explicit keys passed in the request body, but fall back to server env vars if omitted.
+    const apiKey = body.apiKey || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || "";
+    const apiSecret = body.apiSecret || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || "";
+    const { isPaper, symbol, qty, side, notional, estimatedPrice } = body;
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
@@ -102,16 +105,21 @@ export async function POST(req: Request) {
     });
 
     if (!orderRes.ok) {
+      const status = orderRes.status;
       const errorText = await orderRes.text();
-      let parsedErr;
+      let parsedErr = null;
       try {
         parsedErr = JSON.parse(errorText);
       } catch (e) {
         parsedErr = null;
       }
       const message = parsedErr?.message || errorText || "Alpaca rejected order.";
+      let guidance = "";
+      if (status === 401) {
+        guidance = " This looks like a 401 Unauthorized from Alpaca — confirm you are using PAPER keys when `isPaper:true` or LIVE keys when `isPaper:false`. Add ALPACA_PAPER_API_KEY/ALPACA_PAPER_API_SECRET for paper testing or set `isPaper:false` to use live keys.";
+      }
       return NextResponse.json(
-        { error: `Alpaca rejection: ${message}` },
+        { error: `Alpaca rejection: ${message}${guidance}` },
         { status: 200 }
       );
     }

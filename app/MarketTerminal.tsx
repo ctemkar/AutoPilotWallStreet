@@ -466,6 +466,7 @@ export default function MarketTerminal() {
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
   const [autopilotCryptoOnly, setAutopilotCryptoOnly] = useState<boolean>(false);
   const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean; india: boolean; crypto: boolean }>({ wallStreet: false, india: false, crypto: false });
+  const [autopilotAutoSwitchEnabled, setAutopilotAutoSwitchEnabled] = useState<boolean>(true);
   const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
@@ -526,6 +527,8 @@ export default function MarketTerminal() {
       if (blockedMarketsStored) {
         try { setBlockedMarkets(JSON.parse(blockedMarketsStored)); } catch (e) {}
       }
+      const autoSwitchRaw = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotAutoSwitchEnabled");
+      if (autoSwitchRaw) setAutopilotAutoSwitchEnabled(autoSwitchRaw === "true");
     } catch (e) {
       // ignore
     }
@@ -548,12 +551,129 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
         localStorage.setItem("sentry:scanBroadUniverse", String(autopilotScanBroadUniverse));
         localStorage.setItem("sentry:autopilotCryptoOnly", String(autopilotCryptoOnly));
+        localStorage.setItem("sentry:autopilotAutoSwitchEnabled", String(autopilotAutoSwitchEnabled));
         localStorage.setItem("sentry:blockedMarkets", JSON.stringify(blockedMarkets));
         localStorage.setItem("sentry:allowLiveShorts", String(allowLiveShorts));
         localStorage.setItem("sentry:positionsView", positionsView);
       }
     } catch (e) {}
-  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse]);
+  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets]);
+
+  // Automatic ET-based toggle: after Wall Street close (16:00 ET) prefer crypto-only autopilot,
+  // and re-enable non-crypto before market open (9:30 ET). Skip automatic toggles on weekends.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    // Helper: compute whether a given ET date is a NYSE holiday. Covers common market closures.
+    const isMarketHoliday = (d: Date) => {
+      const year = d.getFullYear();
+      // normalize to date-only in ET
+      const dt = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+      const addDays = (base: Date, n: number) => new Date(base.getFullYear(), base.getMonth(), base.getDate() + n);
+
+      // Observed fixed-date holiday helper
+      const observed = (month: number, day: number) => {
+        const raw = new Date(year, month - 1, day);
+        const wd = raw.getDay();
+        if (wd === 6) return addDays(raw, -1); // Saturday -> observed Friday
+        if (wd === 0) return addDays(raw, 1);  // Sunday -> observed Monday
+        return raw;
+      };
+
+      // nth weekday helper (e.g., 3rd Monday of Feb)
+      const nthWeekday = (month: number, weekday: number, n: number) => {
+        const first = new Date(year, month - 1, 1);
+        const firstWd = first.getDay();
+        const day = 1 + ((7 + weekday - firstWd) % 7) + (n - 1) * 7;
+        return new Date(year, month - 1, day);
+      };
+
+      // Last Monday of month helper
+      const lastWeekday = (month: number, weekday: number) => {
+        const last = new Date(year, month, 0); // last day of month
+        const diff = (last.getDay() - weekday + 7) % 7;
+        return new Date(year, month - 1, last.getDate() - diff);
+      };
+
+      // Good Friday: compute Easter Sunday (Meeus/Jones algorithm) then subtract 2 days
+      const easterSunday = (() => {
+        const a = year % 19;
+        const b = Math.floor(year / 100);
+        const c = year % 100;
+        const d = Math.floor(b / 4);
+        const e = b % 4;
+        const f = Math.floor((b + 8) / 25);
+        const g = Math.floor((b - f + 1) / 3);
+        const h = (19 * a + b - d - g + 15) % 30;
+        const i = Math.floor(c / 4);
+        const k = c % 4;
+        const l = (32 + 2 * e + 2 * i - h - k) % 7;
+        const m = Math.floor((a + 11 * h + 22 * l) / 451);
+        const month = Math.floor((h + l - 7 * m + 114) / 31); // 3=March,4=April
+        const day = ((h + l - 7 * m + 114) % 31) + 1;
+        return new Date(year, month - 1, day);
+      })();
+      const goodFriday = addDays(easterSunday, -2);
+
+      const holidays: Date[] = [];
+      // New Year's Day
+      holidays.push(observed(1, 1));
+      // Martin Luther King Jr. Day: 3rd Monday of Jan
+      holidays.push(nthWeekday(1, 1, 3));
+      // Presidents Day: 3rd Monday of Feb
+      holidays.push(nthWeekday(2, 1, 3));
+      // Good Friday
+      holidays.push(goodFriday);
+      // Memorial Day: last Monday of May
+      holidays.push(lastWeekday(5, 1));
+      // Juneteenth (June 19 observed)
+      holidays.push(observed(6, 19));
+      // Independence Day (July 4 observed)
+      holidays.push(observed(7, 4));
+      // Labor Day: 1st Monday of Sep
+      holidays.push(nthWeekday(9, 1, 1));
+      // Thanksgiving: 4th Thursday of Nov
+      holidays.push(nthWeekday(11, 4, 4));
+      // Christmas (Dec 25 observed)
+      holidays.push(observed(12, 25));
+
+      return holidays.some(h => h.getFullYear() === dt.getFullYear() && h.getMonth() === dt.getMonth() && h.getDate() === dt.getDate());
+    };
+
+    const shouldBeCryptoOnly = () => {
+      const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const day = et.getDay();
+      // Skip automatic switching on weekends (Sat=6, Sun=0) and NYSE holidays
+      if (day === 0 || day === 6) return null;
+      if (isMarketHoliday(et)) return null;
+      const mins = et.getHours() * 60 + et.getMinutes();
+      // After 16:00 (960) until next day's 9:30 (570) treat as Wall Street closed window
+      if (mins >= 960 || mins < 570) return true;
+      return false;
+    };
+
+    const applyCheck = () => {
+      try {
+        const target = shouldBeCryptoOnly();
+        if (target === null) return; // weekend, do nothing
+        if (target && !autopilotCryptoOnly) {
+          setAutopilotCryptoOnly(true);
+          addAutopilotLog(`Autopilot automatically switched to crypto-only after Wall Street close (ET).`, "info");
+        } else if (!target && autopilotCryptoOnly) {
+          setAutopilotCryptoOnly(false);
+          addAutopilotLog(`Autopilot automatically re-enabled non-crypto trading during Wall Street open (ET).`, "info");
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    // run immediately and every minute
+    applyCheck();
+    const t = setInterval(applyCheck, 60 * 1000);
+    return () => clearInterval(t);
+  }, [autopilotCryptoOnly, addAutopilotLog]);
 
   useEffect(() => {
     try {
@@ -756,6 +876,23 @@ export default function MarketTerminal() {
     return false;
   }, []);
 
+  // Normalize symbol to exchange-friendly form (e.g. ETH -> ETHUSD, ETHd -> ETHUSD)
+  const normalizeSymbol = useCallback((s: string) => {
+    if (!s) return s;
+    let u = String(s).toUpperCase().trim();
+    // strip non-alphanumeric characters
+    u = u.replace(/[^A-Z0-9]/g, "");
+    // if bare token like "ETH", assume USD pair
+    if (/^[A-Z]{2,5}$/.test(u) && !u.endsWith("USD") && !u.endsWith("USDT")) {
+      return `${u}USD`;
+    }
+    // common typo: trailing single 'D' (e.g. ETHd) -> USD
+    if (u.endsWith("D") && !u.endsWith("USD") && u.length > 1) {
+      return `${u.slice(0, -1)}USD`;
+    }
+    return u;
+  }, []);
+
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
     if (!useAlpacaLive) return;
@@ -823,11 +960,15 @@ export default function MarketTerminal() {
         }
         addLog("ANGELONE", "SYNC", "Indian market portfolio successfully synced.", "SUCCESS");
       } else {
-        if (!apiKey || !apiSecret) return;
+        const payload: any = { isPaper };
+        if (apiKey && apiSecret) {
+          payload.apiKey = apiKey;
+          payload.apiSecret = apiSecret;
+        }
         const response = await fetch("/api/alpaca", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ apiKey, apiSecret, isPaper }),
+          body: JSON.stringify(payload),
         });
 
         const resText = await response.text();
@@ -1430,12 +1571,28 @@ export default function MarketTerminal() {
       const release = await orderMutexRef.current.acquire();
       try {
         let response;
-        // If this is a crypto symbol, route to Gemini proxy for live execution
+        // If this is a crypto symbol, route to Binance proxy for live execution
         if (isCryptoSymbol(symbolClean)) {
-          response = await fetch("/api/gemini/trade", {
+          // normalize symbol and validate buying power before sending to exchange
+          const normSymbol = normalizeSymbol(symbolClean);
+          const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
+          const intendedCost = estPrice * finalQty;
+          const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+          const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+          const isFractional = finalQty % 1 !== 0;
+          const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+          const maxSafeOrderVal = maxAllowedPower * 0.7;
+          if (intendedCost > maxSafeOrderVal) {
+            setIsPlacingOrder(false);
+            setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
+            addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`);
+            return;
+          }
+
+          response = await fetch("/api/binance/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ symbol: symbolClean, side, type: "MARKET", quantity: finalQty, isLive: true, openShort: side === "SELL" }),
+            body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: finalQty, isLive: true, openShort: side === "SELL" }),
           });
         } else if (curRef.brokerType === "ANGELONE") {
           response = await fetch("/api/angelone/trade", {
@@ -3036,11 +3193,13 @@ export default function MarketTerminal() {
     // Restore Alpaca keys
     const savedApiKey = localStorage.getItem("APCA_API_KEY") || "";
     const savedApiSecret = localStorage.getItem("APCA_API_SECRET") || "";
-    const savedIsPaper = localStorage.getItem("APCA_IS_PAPER") !== "false";
+    const rawSavedIsPaper = localStorage.getItem("APCA_IS_PAPER");
+    const savedIsPaper = rawSavedIsPaper === null ? null : rawSavedIsPaper !== "false";
 
     if (savedApiKey) setApiKey(savedApiKey);
     if (savedApiSecret) setApiSecret(savedApiSecret);
-    setIsPaper(savedIsPaper);
+    // If user explicitly set a preference, restore it now. Otherwise we'll auto-detect below.
+    if (savedIsPaper !== null) setIsPaper(savedIsPaper);
 
     // Restore Angel One keys
     const savedAngelApiKey = localStorage.getItem("ANGEL_API_KEY") || "";
@@ -3280,6 +3439,26 @@ export default function MarketTerminal() {
           }
         ]);
       }
+
+      // Auto-detect: if the user didn't explicitly choose Paper/Live, prefer Live when only LIVE keys exist on server.
+      try {
+        if (rawSavedIsPaper === null) {
+          const resp = await fetch("/api/alpaca/inspect");
+          if (resp.ok) {
+            const info = await resp.json();
+            const present = info?.envKeysPresent || {};
+            const hasLive = !!present.ALPACA_LIVE_API_KEY || !!present.ALPACA_LIVE_API_SECRET;
+            const hasPaper = !!present.ALPACA_PAPER_API_KEY || !!present.ALPACA_PAPER_API_SECRET;
+            if (hasLive && !hasPaper) {
+              setIsPaper(false);
+              localStorage.setItem("APCA_IS_PAPER", "false");
+              addLog("ALPACA", "AUTO_SWITCH", "No paper keys found on server; defaulting Alpaca mode to Live.", "INFO");
+            }
+          }
+        }
+      } catch (e) {
+        // ignore detection failures — keep defaults
+      }
     };
 
     initApp();
@@ -3289,19 +3468,22 @@ export default function MarketTerminal() {
 
   // Connect & fetch from Alpaca
   const handleConnectAlpaca = async () => {
-    if (!apiKey || !apiSecret) {
-      addLog("ALPACA", "CONNECT_ERROR", "Key or Secret cannot be blank.", "WARNING");
-      return;
-    }
-
     setIsConnecting(true);
     addLog("ALPACA", "CONNECT_ATTEMPT", `Attempting connection to Alpaca ${isPaper ? "Paper" : "Live"} API...`, "INFO");
 
     try {
+      const payload: any = { isPaper };
+      if (apiKey && apiSecret) {
+        payload.apiKey = apiKey;
+        payload.apiSecret = apiSecret;
+      } else {
+        addLog("ALPACA", "CONNECT_INFO", "No client-side API keys provided; attempting server-side credentials from .env.local.", "INFO");
+      }
+
       const response = await fetch("/api/alpaca", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, apiSecret, isPaper }),
+        body: JSON.stringify(payload),
       });
 
       const resText = await response.text();
@@ -3551,6 +3733,7 @@ export default function MarketTerminal() {
       // Centralized routing: if this is a crypto symbol, route to Gemini proxy for live execution
       const isCrypto = isCryptoSymbol(symbolClean);
       if (isCrypto) {
+        const normSymbol = normalizeSymbol(symbolClean);
         const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
         const ownedQty = existingPos ? existingPos.qty : 0;
         const attemptingOpenShort = side === "SELL" && (ownedQty <= 0 || qtyNum > ownedQty);
@@ -3563,8 +3746,23 @@ export default function MarketTerminal() {
 
         addLog("GEMINI", side, `Transmitting Crypto Order to Gemini: ${side} ${qtyNum} ${symbolClean} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
         try {
+          // buying-power check for manual crypto orders
+          const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
+          const intendedCost = estPrice * parseFloat(qtyNum.toFixed(6));
+          const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+          const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+          const isFractional = qtyNum % 1 !== 0;
+          const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+          const maxSafeOrderVal = maxAllowedPower * 0.7;
+          if (intendedCost > maxSafeOrderVal) {
+            setIsPlacingOrder(false);
+            setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
+            addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`);
+            return;
+          }
+
           const payload: any = {
-            symbol: symbolClean,
+            symbol: normSymbol,
             side: side,
             type: "MARKET",
             quantity: parseFloat(qtyNum.toFixed(6)),
@@ -3619,6 +3817,7 @@ export default function MarketTerminal() {
         // Route crypto symbols to Binance (live) instead of Alpaca when appropriate
         const isCrypto = isCryptoSymbol(symbolClean);
         if (isCrypto) {
+          const normSymbol = normalizeSymbol(symbolClean);
           // Shorting gating: opening a short (selling without owning) requires explicit allowLiveShorts
           const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
           const ownedQty = existingPos ? existingPos.qty : 0;
@@ -3630,10 +3829,25 @@ export default function MarketTerminal() {
             return;
           }
 
-          addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${symbolClean} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
+          addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${normSymbol} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
           try {
+            // buying-power check for manual crypto orders (Binance)
+            const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
+            const intendedCost = estPrice * parseFloat(qtyNum.toFixed(6));
+            const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+            const isFractional = qtyNum % 1 !== 0;
+            const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+            const maxSafeOrderVal = maxAllowedPower * 0.7;
+            if (intendedCost > maxSafeOrderVal) {
+              setIsPlacingOrder(false);
+              setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
+              addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`);
+              return;
+            }
+
             const payload: any = {
-              symbol: symbolClean,
+              symbol: normSymbol,
               side: side,
               type: "MARKET",
               quantity: parseFloat(qtyNum.toFixed(6)),
@@ -4653,6 +4867,24 @@ if __name__ == "__main__":
           </div>
         </div>
       )}
+
+      {/* Auto-switch control */}
+      <div className="mt-4 mb-4 flex items-center gap-3">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={!!autopilotAutoSwitchEnabled}
+            onChange={(e) => {
+              const v = e.target.checked;
+              setAutopilotAutoSwitchEnabled(v);
+              try { if (typeof window !== 'undefined') localStorage.setItem('sentry:autopilotAutoSwitchEnabled', String(v)); } catch (e) {}
+              addAutopilotLog(`Autopilot auto-switch ${v ? 'enabled' : 'disabled'} by user.`, 'info');
+            }}
+            className="form-checkbox h-4 w-4"
+          />
+          <span className="text-xs">Auto-switch to crypto-only outside Wall Street hours</span>
+        </label>
+      </div>
       {/* Confirmation Modal */}
       {confirmModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -4812,46 +5044,11 @@ if __name__ == "__main__":
             </p>
 
             <div className="space-y-3" id="api-inputs-form">
-              <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1 font-mono">
-                  Alpaca API Key ID
-                </label>
-                <input
-                  type="text"
-                  id="alpaca-api-key-input"
-                  placeholder="e.g. PKXXXXXXXXXXXXXXXXXX"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="w-full bg-brand-bg rounded-lg border border-brand-border p-2.5 text-sm text-white focus:outline-none focus:border-brand-green md:text-base font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1 font-mono">
-                  Alpaca Secret Key
-                </label>
-                <div className="relative" id="api-secret-container">
-                  <input
-                    type={showApiSecret ? "text" : "password"}
-                    id="alpaca-api-secret-input"
-                    placeholder="e.g. abcdefghijklmnopqrstuvwxyzXXXXXX"
-                    value={apiSecret}
-                    onChange={(e) => setApiSecret(e.target.value)}
-                    className="w-full bg-brand-bg rounded-lg border border-brand-border p-2.5 text-sm text-white focus:outline-none focus:border-brand-green pr-10 md:text-base font-mono"
-                  />
-                  <button
-                    type="button"
-                    id="toggle-secret-visibility"
-                    onClick={() => {
-                      const nextVal = !showApiSecret;
-                      setShowApiSecret(nextVal);
-                      showToast(nextVal ? "Alpaca API Secret visible (Private View)." : "Alpaca API Secret redacted.", "INFO");
-                    }}
-                    className="absolute inset-y-0 right-3 flex items-center text-gray-400 hover:text-white"
-                  >
-                    {showApiSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </button>
-                </div>
+              <div className="p-3 bg-brand-bg/40 rounded-lg border border-brand-border/60">
+                <p className="text-xs text-gray-300 font-mono">
+                  Alpaca credentials are loaded from the server environment (`.env.local`). No local entry is required on this dashboard.
+                </p>
+                <p className="text-[10px] text-gray-500 mt-2">To change credentials, update <span className="font-mono">.env.local</span> and restart the dev server.</p>
               </div>
 
               <div id="alpaca-endpoint-toggles" className="flex items-center justify-between py-1 bg-brand-bg/50 px-2.5 rounded-lg border border-brand-border/60">
