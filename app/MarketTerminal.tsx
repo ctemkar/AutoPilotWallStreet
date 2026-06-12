@@ -411,7 +411,29 @@ export default function MarketTerminal() {
 
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(false);
-  const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT">("SCALPER");
+  const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT" | "ELLIOTT_WAVE">("SCALPER");
+
+  // Elliott Wave state map for tracking wave counts per symbol
+  const [elliottStateMap, setElliottStateMap] = useState<Record<string, {
+    symbol: string;
+    waveIndex: number; // 0-5 for impulsive waves
+    peaks: number[]; // recent high/low price anchors
+    status: "SCANNING" | "IMPULSE_DETECTED" | "CORRECTION" | "IDLE";
+  }>>({});
+
+  const setElliottState = useCallback((val: any) => {
+    setElliottStateMap((prev) => {
+      const cur = prev[(val && val.symbol) || ""] || null;
+      const next = typeof val === "function" ? val(cur) : val;
+      if (!next) {
+        const copy = { ...prev };
+        if (next === null && val && val.symbol) delete copy[val.symbol];
+        return copy;
+      }
+      const sym = next.symbol || (cur && cur.symbol) || "";
+      return { ...prev, [sym]: next };
+    });
+  }, []);
   
   // --- TOUCH & TURN OPENING-RANGE SCALPER STATE MAP ---
   const [touchTurnStateMap, setTouchTurnStateMap] = useState<Record<string, {
@@ -6291,6 +6313,7 @@ if __name__ == "__main__":
                       <option value="TOUCH_TURN">🎯 Touch & Turn Opening-Range Scalper (Mechanical)</option>
                       <option value="MACD_FRONT_SIDE">📊 MACD Front-Side Momentum (Anti-Chop Breakout)</option>
                       <option value="SNEAKY_PIVOT">🕵️ Sneaky Pivot (3-Candle Institutional Range)</option>
+                      <option value="ELLIOTT_WAVE">🌊 Elliott Wave Impulse/Correction (Wave Count)</option>
                     </select>
                   </div>
 
