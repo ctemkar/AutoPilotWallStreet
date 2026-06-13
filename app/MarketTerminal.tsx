@@ -80,6 +80,7 @@ interface Log {
 type AutopilotOrderOutcomeCode =
   | "FILLED"
   | "PENDING_BROKER_ACCEPTED"
+  | "BLOCKED_MARKET_CLOSED"
   | "BLOCKED_BUY_COOLDOWN"
   | "BLOCKED_MIN_HOLD"
   | "INVALID_QTY"
@@ -324,6 +325,9 @@ export default function MarketTerminal() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [orderError, setOrderError] = useState("");
   const [orderSuccess, setOrderSuccess] = useState("");
+  const [binancePreferredUsdt, setBinancePreferredUsdt] = useState<number>(0);
+  const [binanceFundingSource, setBinanceFundingSource] = useState<"futures" | "spot" | "none">("none");
+  const [binanceFundingUpdatedAt, setBinanceFundingUpdatedAt] = useState<number | null>(null);
 
   // Simulated (Paper Setup) Parameters
   const [simCash, setSimCash] = useState(2000);
@@ -432,6 +436,45 @@ export default function MarketTerminal() {
     },
     [showToast]
   );
+
+  const fetchBinanceFundingSnapshot = useCallback(async (): Promise<{ usdt: number; source: "futures" | "spot" | "none" }> => {
+    try {
+      const prefRes = await fetch('/api/binance/preferred-usdt', { cache: 'no-store' });
+      const pref = await prefRes.json();
+      const prefUsdt = parseFloat(pref?.usdt || 0);
+      const usdt = Number.isFinite(prefUsdt) ? prefUsdt : 0;
+      const source: "futures" | "spot" | "none" = pref?.source === "futures" || pref?.source === "spot" ? pref.source : "none";
+      setBinancePreferredUsdt(usdt);
+      setBinanceFundingSource(source);
+      setBinanceFundingUpdatedAt(Date.now());
+      return { usdt, source };
+    } catch (e) {
+      setBinancePreferredUsdt(0);
+      setBinanceFundingSource("none");
+      setBinanceFundingUpdatedAt(Date.now());
+      return { usdt: 0, source: "none" };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!useAlpacaLive) return;
+
+    let mounted = true;
+    const refresh = async () => {
+      const snap = await fetchBinanceFundingSnapshot();
+      if (!mounted) return;
+      if (snap.usdt <= 0 && snap.source === "none") {
+        // Keep this informational only; order flow still performs hard checks.
+      }
+    };
+
+    refresh();
+    const t = setInterval(refresh, 45000);
+    return () => {
+      mounted = false;
+      clearInterval(t);
+    };
+  }, [useAlpacaLive, fetchBinanceFundingSnapshot]);
 
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(false);
@@ -703,9 +746,9 @@ export default function MarketTerminal() {
     const shouldBeCryptoOnly = () => {
       const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
       const day = et.getDay();
-      // Skip automatic switching on weekends (Sat=6, Sun=0) and NYSE holidays
-      if (day === 0 || day === 6) return null;
-      if (isMarketHoliday(et)) return null;
+      // Force crypto-only on weekends and NYSE holidays.
+      if (day === 0 || day === 6) return true;
+      if (isMarketHoliday(et)) return true;
       const mins = et.getHours() * 60 + et.getMinutes();
       // After 16:00 (960) until next day's 9:30 (570) treat as Wall Street closed window
       if (mins >= 960 || mins < 570) return true;
@@ -715,7 +758,6 @@ export default function MarketTerminal() {
     const applyCheck = () => {
       try {
         const target = shouldBeCryptoOnly();
-        if (target === null) return; // weekend, do nothing
         if (target && !autopilotCryptoOnly) {
           setAutopilotCryptoOnly(true);
           addAutopilotLog(`Autopilot automatically switched to crypto-only after Wall Street close (ET).`, "info");
@@ -1321,6 +1363,22 @@ export default function MarketTerminal() {
       const isCrypto = isCryptoSymbol(symbolClean);
       const isIndia = symbolClean.endsWith('.NS') || symbolClean.endsWith('.BO') || curRef.brokerType === 'ANGELONE';
       const isWallStreet = !isCrypto && !isIndia;
+
+      // Hard guard: when Wall Street session is closed, block non-crypto autopilot orders.
+      const marketSessionNow = getMarketSessionET();
+      if (marketSessionNow === "CLOSED" && !isCrypto) {
+        addAutopilotLog(`Blocked ${side} ${symbolClean}: market session is CLOSED (ET).`, "warn");
+        return {
+          status: "BLOCKED",
+          code: "BLOCKED_MARKET_CLOSED",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: "Market is closed. Non-crypto orders are blocked until pre-market."
+        };
+      }
+
       if (curRef.autopilotCryptoOnly && side === 'BUY' && !isCrypto) {
         addAutopilotLog(`Blocked BUY ${symbolClean}: autopilot configured for crypto-only trading.`, 'warn');
         return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Autopilot set to crypto-only.' };
@@ -1814,15 +1872,14 @@ export default function MarketTerminal() {
 
           // Prefer server-side Binance futures USDT balance when available
           let maxSafeOrderVal = 0;
-          try {
-            const prefRes = await fetch('/api/binance/preferred-usdt');
-            const pref = await prefRes.json();
-            const prefUsdt = parseFloat(pref?.usdt || 0) || 0;
-            if (prefUsdt > 0) {
-              maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
-            }
-          } catch (e) {
-            // ignore and fallback
+          let preferredUsdt = 0;
+          let preferredSource: "futures" | "spot" | "none" = "none";
+          const pref = await fetchBinanceFundingSnapshot();
+          const prefUsdt = pref.usdt;
+          preferredUsdt = prefUsdt;
+          preferredSource = pref.source;
+          if (prefUsdt > 0) {
+            maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
           }
 
           if (!maxSafeOrderVal || maxSafeOrderVal <= 0) {
@@ -1851,7 +1908,7 @@ export default function MarketTerminal() {
           response = await fetch("/api/binance/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: cryptoQtyToSend, isLive: true, openShort: side === "SELL" }),
+            body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: cryptoQtyToSend, isLive: true, openShort: side === "SELL", preferredUsdt, preferredSource }),
           });
         } else if (curRef.brokerType === "ANGELONE") {
           // For AngelOne, use paper/sandbox mode automatically when `isPaper` is set.
@@ -2549,6 +2606,12 @@ export default function MarketTerminal() {
       const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
       let scanTargets = baseTargets.filter((sym: string) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
 
+      // During CLOSED session, only scan crypto symbols so non-crypto order attempts are not spammed.
+      const marketSessionNow = getMarketSessionET();
+      if (marketSessionNow === "CLOSED") {
+        scanTargets = scanTargets.filter((sym: string) => isCryptoSymbol(sym));
+      }
+
       // If user supplied only one target and it's temporarily blocked by Loss Guard,
       // rotate through quick tickers instead of hammering the same blocked symbol.
       if (baseTargets.length <= 1 && scanTargets.length === 0) {
@@ -2561,6 +2624,14 @@ export default function MarketTerminal() {
 
       if (scanTargets.length === 0) {
         scanTargets = baseTargets;
+        if (marketSessionNow === "CLOSED") {
+          scanTargets = scanTargets.filter((sym: string) => isCryptoSymbol(sym));
+        }
+      }
+
+      if (scanTargets.length === 0) {
+        addAutopilotLog("Autopilot scan skipped: market session is CLOSED and no crypto symbols are eligible.", "info");
+        return;
       }
       const targetIdx = autopilotTargetSymbolIndexRef.current % scanTargets.length;
       const targetSymbol = scanTargets[targetIdx];
@@ -4213,15 +4284,14 @@ export default function MarketTerminal() {
           }
           const intendedCost = estPrice * qtyToSend;
           let maxSafeOrderVal = 0;
-          try {
-            const prefRes = await fetch('/api/binance/preferred-usdt');
-            const pref = await prefRes.json();
-            const prefUsdt = parseFloat(pref?.usdt || 0);
-            if (prefUsdt > 0) {
-              maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
-            }
-          } catch (e) {
-            // ignore and fallback
+          let preferredUsdt = 0;
+          let preferredSource: "futures" | "spot" | "none" = "none";
+          const pref = await fetchBinanceFundingSnapshot();
+          const prefUsdt = pref.usdt;
+          preferredUsdt = prefUsdt;
+          preferredSource = pref.source;
+          if (prefUsdt > 0) {
+            maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
           }
 
           if (maxSafeOrderVal <= 0) {
@@ -4246,6 +4316,8 @@ export default function MarketTerminal() {
             quantity: qtyToSend,
             isLive: true,
             openShort: attemptingOpenShort && allowLiveShorts,
+            preferredUsdt,
+            preferredSource,
           };
 
           const response = await fetch("/api/binance/trade", {
@@ -4319,15 +4391,14 @@ export default function MarketTerminal() {
             }
             const intendedCost = estPrice * qtyToSend;
             let maxSafeOrderVal = 0;
-            try {
-              const prefRes = await fetch('/api/binance/preferred-usdt');
-              const pref = await prefRes.json();
-              const prefUsdt = parseFloat(pref?.usdt || 0);
-              if (prefUsdt > 0) {
-                maxSafeOrderVal = prefUsdt * 0.9;
-              }
-            } catch (e) {
-              // ignore
+            let preferredUsdt = 0;
+            let preferredSource: "futures" | "spot" | "none" = "none";
+            const pref = await fetchBinanceFundingSnapshot();
+            const prefUsdt = pref.usdt;
+            preferredUsdt = prefUsdt;
+            preferredSource = pref.source;
+            if (prefUsdt > 0) {
+              maxSafeOrderVal = prefUsdt * 0.9;
             }
             if (maxSafeOrderVal <= 0) {
               const cashValue = parseFloat(alpacaAccount?.cash || "0");
@@ -4350,6 +4421,8 @@ export default function MarketTerminal() {
               quantity: qtyToSend,
               isLive: true,
               openShort: attemptingOpenShort && allowLiveShorts,
+              preferredUsdt,
+              preferredSource,
             };
 
             const response = await fetch("/api/binance/trade", {
@@ -4370,7 +4443,7 @@ export default function MarketTerminal() {
               throw new Error(dataOrder?.error || "Order rejected by Gemini proxy server.");
             }
 
-            setOrderSuccess(`Gemini order accepted: ${dataOrder.order?.clientOrderId || dataOrder.order?.orderId || 'submitted'}`);
+            setOrderSuccess(`Binance order accepted: ${dataOrder.order?.clientOrderId || dataOrder.order?.orderId || 'submitted'}`);
             addLog(symbolClean, `${side}_FILLED`, `Binance crypto order executed for ${qtyNum} ${symbolClean}.`, "SUCCESS");
 
             const newOrderObj: Order = {
@@ -5359,6 +5432,18 @@ if __name__ == "__main__":
       }
     : null;
 
+  const binanceFundingSourceLabel = binanceFundingSource === "futures"
+    ? "FUTURES"
+    : binanceFundingSource === "spot"
+      ? "SPOT"
+      : "NONE";
+  const binanceFundingSourcePillClass = binanceFundingSource === "futures"
+    ? "bg-emerald-950/30 text-emerald-300 border border-emerald-600/40"
+    : binanceFundingSource === "spot"
+      ? "bg-cyan-950/30 text-cyan-300 border border-cyan-600/40"
+      : "bg-yellow-950/30 text-yellow-300 border border-yellow-600/40";
+  const binanceFundingAgeSec = binanceFundingUpdatedAt ? Math.max(0, Math.floor((Date.now() - binanceFundingUpdatedAt) / 1000)) : null;
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 bg-brand-bg md:p-8" id="root-container">
       {/* In-app Error Overlay */}
@@ -5647,6 +5732,18 @@ if __name__ == "__main__":
                     Live Real
                   </button>
                 </div>
+              </div>
+
+              <div className="py-2 px-2.5 rounded-lg bg-brand-bg/40 border border-brand-border/60">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-gray-400 font-medium">Binance Funding Source</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider font-mono ${binanceFundingSourcePillClass}`}>
+                    {binanceFundingSourceLabel}
+                  </span>
+                </div>
+                <p className="text-[10px] text-gray-500 mt-1 font-mono">
+                  Preferred USDT: {binancePreferredUsdt.toFixed(4)}{binanceFundingAgeSec !== null ? ` • updated ${binanceFundingAgeSec}s ago` : ""}
+                </p>
               </div>
             </div>
           </div>

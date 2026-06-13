@@ -83,45 +83,36 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "BINANCE API credentials missing on server." }, { status: 200 });
     }
 
-    // Prefer futures USDT balance when deciding buying power. If futures has no usable USDT,
-    // fall back to spot balance and route order to spot.
-    const BASE = process.env.BASE_URL || 'http://localhost:3000';
+    // Prefer frontend-provided funding snapshot to avoid duplicate endpoint probing per order.
+    // Fall back to preferred-usdt endpoint when the client does not send a balance hint.
+    const BASE = process.env.BASE_URL || "http://localhost:3000";
     const getPreferredFunding = async (): Promise<{ usdt: number; source: "futures" | "spot" | "none" }> => {
-      try {
-        const res = await fetch(`${BASE}/api/binance/futures/account`);
-        const txt = await res.text();
-        const d = JSON.parse(txt || '{}');
-        console.log('📊 Futures account response:', JSON.stringify(d).slice(0, 300));
-        if (d && d.usdt && (d.usdt.free || d.usdt.balance)) {
-          const val = parseFloat(d.usdt.free || d.usdt.balance || '0');
-          console.log('✅ Futures USDT found:', val);
-          if (!isNaN(val) && val > 0) return { usdt: val, source: "futures" };
-        }
-      } catch (e) {
-        console.error('🔴 Futures fetch failed:', e);
-        // ignore and fallback
+      const hintedUsdt = parseFloat(String(body?.preferredUsdt ?? "0"));
+      const hintedSourceRaw = String(body?.preferredSource || "").toLowerCase();
+      const hintedSource: "futures" | "spot" | "none" = hintedSourceRaw === "futures"
+        ? "futures"
+        : hintedSourceRaw === "spot"
+          ? "spot"
+          : "none";
+      if (Number.isFinite(hintedUsdt) && hintedUsdt > 0 && hintedSource !== "none") {
+        return { usdt: hintedUsdt, source: hintedSource };
       }
 
       try {
-        const res2 = await fetch(`${BASE}/api/binance/account`);
-        const txt2 = await res2.text();
-        const d2 = JSON.parse(txt2 || '{}');
-        if (d2 && d2.account && Array.isArray(d2.account.balances)) {
-          const usdt = d2.account.balances.find((b: any) => b.asset === 'USDT' || b.asset === 'USD');
-          if (usdt) {
-            const free   = parseFloat(usdt.free   || '0');
-            const locked = parseFloat(usdt.locked  || '0');
-            const val = free + locked;
-            console.log(`✅ Spot USDT found: free=${free} locked=${locked} total=${val}`);
-            if (!isNaN(val) && val > 0) return { usdt: val, source: "spot" };
-          }
-        }
+        const res = await fetch(`${BASE}/api/binance/preferred-usdt`, { cache: "no-store" });
+        const txt = await res.text();
+        const d = JSON.parse(txt || "{}");
+        const usdt = parseFloat(String(d?.usdt || 0)) || 0;
+        const sourceRaw = String(d?.source || "none").toLowerCase();
+        const source: "futures" | "spot" | "none" = sourceRaw === "futures"
+          ? "futures"
+          : sourceRaw === "spot"
+            ? "spot"
+            : "none";
+        return { usdt, source };
       } catch (e) {
-        console.error('🔴 Spot fetch failed:', e);
-        // ignore
+        return { usdt: 0, source: "none" };
       }
-      console.warn('⚠️ No USDT balance found anywhere');
-      return { usdt: 0, source: "none" };
     };
 
     // Build parameters for MARKET order on FUTURES: symbol, side, type=MARKET, quantity, timestamp
@@ -129,15 +120,12 @@ export async function POST(req: Request) {
     const preferred = await getPreferredFunding();
     const preferredUsdt = preferred.usdt;
     const balanceSource = preferred.source;
-    console.log(`💰 Preferred USDT balance: ${preferredUsdt}`);
-    console.log(`🏦 Balance source selected: ${balanceSource}`);
     let executionVenue: "futures" | "spot" = balanceSource === "futures" ? "futures" : "spot";
     
     let finalQty = requestedQty;
     if (side === 'BUY') {
       // If no preferred USDT is available at all, block immediate live BUYs to avoid accidental orders.
       if (!preferredUsdt || preferredUsdt <= 0) {
-        console.error(`🚫 Blocking BUY: insufficient USDT (${preferredUsdt})`);
         return NextResponse.json({ error: `Insufficient USDT available (preferred balance=${preferredUsdt}). Refusing to place live BUY order.` }, { status: 200 });
       }
       try {
