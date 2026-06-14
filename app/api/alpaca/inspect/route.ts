@@ -15,6 +15,8 @@ export async function GET() {
     "ALPACA_PAPER_API_SECRET",
     "ALPACA_API_KEY",
     "ALPACA_API_SECRET",
+    "ALPACA_KEY",
+    "ALPACA_SECRET",
   ];
 
   const present: Record<string, boolean> = {};

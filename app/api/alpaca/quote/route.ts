@@ -35,11 +35,13 @@ function resolveAlpacaCredentials() {
   const apiKey =
     process.env.ALPACA_LIVE_API_KEY ||
     process.env.ALPACA_API_KEY ||
+    process.env.ALPACA_KEY ||
     process.env.ALPACA_PAPER_API_KEY ||
     "";
   const apiSecret =
     process.env.ALPACA_LIVE_API_SECRET ||
     process.env.ALPACA_API_SECRET ||
+    process.env.ALPACA_SECRET ||
     process.env.ALPACA_PAPER_API_SECRET ||
     "";
 

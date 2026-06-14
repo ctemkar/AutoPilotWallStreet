@@ -28,8 +28,8 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
     // Prefer explicit keys passed in the request body, but fall back to server env vars if omitted.
-    const apiKey = body.apiKey || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || "";
-    const apiSecret = body.apiSecret || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || "";
+    const apiKey = body.apiKey || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || "";
+    const apiSecret = body.apiSecret || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || "";
     const { isPaper, symbol, qty, side, notional, estimatedPrice } = body;
 
     if (!apiKey || !apiSecret) {
