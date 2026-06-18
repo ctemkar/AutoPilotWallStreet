@@ -119,19 +119,17 @@ export async function POST(req: Request) {
     // Server-side buying-power enforcement: fetch preferred USDT and current futures price to estimate cost
     const preferred = await getPreferredFunding();
     const preferredUsdt = preferred.usdt;
-    const balanceSource = preferred.source;
-    let executionVenue: "futures" | "spot" = balanceSource === "futures" ? "futures" : "spot";
+    const preferredSource = preferred.source === "futures" ? "futures" : "none";
+    const executionVenue: "futures" = "futures";
     
+    if (!preferredUsdt || preferredUsdt <= 0 || preferredSource !== "futures") {
+      return NextResponse.json({ error: `Binance futures funding unavailable. Live futures USDT required. preferred source=${preferred.source}, preferred balance=${preferredUsdt}` }, { status: 200 });
+    }
+
     let finalQty = requestedQty;
     if (side === 'BUY') {
-      // If no preferred USDT is available at all, block immediate live BUYs to avoid accidental orders.
-      if (!preferredUsdt || preferredUsdt <= 0) {
-        return NextResponse.json({ error: `Insufficient USDT available (preferred balance=${preferredUsdt}). Refusing to place live BUY order.` }, { status: 200 });
-      }
       try {
-        const priceUrl = executionVenue === "futures"
-          ? `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`
-          : `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
+        const priceUrl = `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`;
         const priceRes = await fetch(priceUrl);
         const priceTxt = await priceRes.text();
         const priceObj = JSON.parse(priceTxt || '{}');
@@ -169,9 +167,7 @@ export async function POST(req: Request) {
     const queryString = qs.toString();
     const signature = sign(queryString, apiSecret);
 
-    const orderUrl = executionVenue === "futures"
-      ? `https://fapi.binance.com/fapi/v1/order?${queryString}&signature=${signature}`
-      : `https://api.binance.com/api/v3/order?${queryString}&signature=${signature}`;
+    const orderUrl = `https://fapi.binance.com/fapi/v1/order?${queryString}&signature=${signature}`;
     const res = await fetch(orderUrl, {
       method: 'POST',
       headers: {
@@ -195,8 +191,8 @@ export async function POST(req: Request) {
         requestedQty,
         submittedQty: finalQty,
         autoResized: finalQty !== requestedQty,
-        balanceSource,
-        executionVenue,
+        balanceSource: "futures",
+        executionVenue: "futures",
       }
     });
   } catch (err: any) {

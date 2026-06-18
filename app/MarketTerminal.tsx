@@ -831,6 +831,7 @@ export default function MarketTerminal() {
 
     const applyCheck = () => {
       try {
+        if (!autopilotAutoSwitchEnabled) return;
         const target = shouldBeCryptoOnly();
         if (target && !autopilotCryptoOnly) {
           setAutopilotCryptoOnly(true);
@@ -848,7 +849,7 @@ export default function MarketTerminal() {
     applyCheck();
     const t = setInterval(applyCheck, 60 * 1000);
     return () => clearInterval(t);
-  }, [autopilotCryptoOnly, addAutopilotLog]);
+  }, [autopilotCryptoOnly, autopilotAutoSwitchEnabled, addAutopilotLog]);
 
   useEffect(() => {
     try {
@@ -2040,9 +2041,11 @@ export default function MarketTerminal() {
           let preferredSource: "futures" | "spot" | "none" = "none";
           const pref = await fetchBinanceFundingSnapshot();
           const prefUsdt = pref.usdt;
-          preferredUsdt = prefUsdt;
-          preferredSource = pref.source;
-          if (prefUsdt > 0) {
+          const prefSource = pref.source === "futures" ? "futures" : "none";
+          preferredUsdt = prefSource === "futures" ? prefUsdt : 0;
+          preferredSource = prefSource;
+          // Only prefer Binance futures funding when the USDT balance is actually large enough to support a crypto order.
+          if (prefSource === "futures" && prefUsdt >= 50) {
             maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
           }
 
@@ -2052,6 +2055,9 @@ export default function MarketTerminal() {
             const isFractional = finalQty % 1 !== 0;
             const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
             maxSafeOrderVal = maxAllowedPower * 0.7;
+            if (prefUsdt > 0 && prefUsdt < 50) {
+              addAutopilotLog(`Binance USDT balance is low (${prefUsdt.toFixed(2)}). Falling back to Alpaca buying power for crypto trade sizing.`, "info");
+            }
           }
 
           if (intendedCost > maxSafeOrderVal) {
@@ -2906,7 +2912,7 @@ export default function MarketTerminal() {
         if (randSeed > buyThreshold) {
           const buyQty = isLiveMode
             ? liveQtyByBudget
-            : (targetSymbol === "BTCUSD" ? 0.02 : 5);
+            : getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
           addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) is dipping below support. Attempting BUY order.`, "trade");
           const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
           logScanOrderOutcome("SCALPER", orderOutcome);
@@ -3110,7 +3116,7 @@ export default function MarketTerminal() {
               const oppositeSide = tState.side === "BUY" ? "SELL" : "BUY";
               addAutopilotLog(`🎉 Take Profit target met at ${curPrefix}${currentSpotPrice.toFixed(2)}! Mean reversion complete for 2:1 profit.`, "success");
 
-              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              const tradeQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
               await executeAutopilotOrder(targetSymbol, oppositeSide as any, tradeQty);
 
               setTouchTurnState({
@@ -3121,7 +3127,7 @@ export default function MarketTerminal() {
               const oppositeSide = tState.side === "BUY" ? "SELL" : "BUY";
               addAutopilotLog(`🛑 Stop loss triggered at ${curPrefix}${currentSpotPrice.toFixed(2)}. Closed out trade boundary limit.`, "warn");
 
-              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              const tradeQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
               await executeAutopilotOrder(targetSymbol, oppositeSide as any, tradeQty);
 
               setTouchTurnState({
@@ -3204,7 +3210,7 @@ export default function MarketTerminal() {
           const initHist = initMacd - initSignal;
 
           const trendSide: "FRONT_SIDE" | "BACK_SIDE" = initHist > 0 ? "FRONT_SIDE" : "BACK_SIDE";
-          const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+          const tradeQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
 
           mState = {
             symbol: targetSymbol,
@@ -3487,7 +3493,7 @@ export default function MarketTerminal() {
               addAutopilotLog(`🎯 Candle 3 Entry order FILLED for ${targetSymbol}! Entering LONG at ${curPrefix}${entryPrice.toFixed(2)}.`, "trade");
               addAutopilotLog(`🛡️ Protected by "Guardian Angel" stop level: ${curPrefix}${stopPrice.toFixed(2)}. Profit target: ${curPrefix}${targetPrice.toFixed(2)}.`, "success");
               
-              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              const tradeQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
               await executeAutopilotOrder(targetSymbol, "BUY", tradeQty);
             } else {
               const stopOffset = (sState.rangeHigh - sState.rangeLow) * 0.15;
@@ -3497,7 +3503,7 @@ export default function MarketTerminal() {
               addAutopilotLog(`🎯 Candle 3 Entry order FILLED for ${targetSymbol}! Entering SHORT at ${curPrefix}${entryPrice.toFixed(2)}.`, "trade");
               addAutopilotLog(`🛡️ Protected by "Guardian Angel" stop level: ${curPrefix}${stopPrice.toFixed(2)}. Profit target: ${curPrefix}${targetPrice.toFixed(2)}.`, "success");
 
-              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              const tradeQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
               await executeAutopilotOrder(targetSymbol, "SELL", tradeQty);
             }
             lastAction = `Candle 3 successfully triggered ${sState.side} entry at ${curPrefix}${entryPrice.toFixed(2)}.`;
@@ -3544,7 +3550,7 @@ export default function MarketTerminal() {
               const oppositeSide = sState.side === "BUY" ? "SELL" : "BUY";
               addAutopilotLog(`🎉 Take Profit target successfully met at ${curPrefix}${currentSpotPrice.toFixed(2)}! Opposite pivot zone reached.`, "success");
 
-              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              const tradeQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
               await executeAutopilotOrder(targetSymbol, oppositeSide as any, tradeQty);
 
               nextStatus = "HIT_TARGET";
@@ -3553,7 +3559,7 @@ export default function MarketTerminal() {
               const oppositeSide = sState.side === "BUY" ? "SELL" : "BUY";
               addAutopilotLog(`🛑 Stop Loss test failed. Cut trade out under protection limit at ${curPrefix}${currentSpotPrice.toFixed(2)}.`, "warn");
 
-              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              const tradeQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
               await executeAutopilotOrder(targetSymbol, oppositeSide as any, tradeQty);
 
               nextStatus = "HIT_STOP";
@@ -4474,9 +4480,10 @@ export default function MarketTerminal() {
           let preferredSource: "futures" | "spot" | "none" = "none";
           const pref = await fetchBinanceFundingSnapshot();
           const prefUsdt = pref.usdt;
-          preferredUsdt = prefUsdt;
-          preferredSource = pref.source;
-          if (prefUsdt > 0) {
+          const prefSource = pref.source === "futures" ? "futures" : "none";
+          preferredUsdt = prefSource === "futures" ? prefUsdt : 0;
+          preferredSource = prefSource;
+          if (prefSource === "futures" && prefUsdt > 0) {
             maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
           }
 
