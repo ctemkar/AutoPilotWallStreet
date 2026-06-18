@@ -310,6 +310,10 @@ export default function MarketTerminal() {
   const [useAlpacaLive, setUseAlpacaLive] = useState(false);
   const [allowLiveShorts, setAllowLiveShorts] = useState(true);
   const [positionsView, setPositionsView] = useState<'ALL' | 'LONGS' | 'SHORTS'>('ALL');
+  const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
+  const [isTickStreamActive, setIsTickStreamActive] = useState(true);
+  const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
+  const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
 
   // Angel One (SmartAPI Indian Market) Configuration
   const [angelApiKey, setAngelApiKey] = useState("");
@@ -972,8 +976,6 @@ export default function MarketTerminal() {
   const [autopilotLastScanAtMs, setAutopilotLastScanAtMs] = useState<number | null>(null);
   const [autopilotNextScanInSec, setAutopilotNextScanInSec] = useState<number | null>(null);
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
-  const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
-  const [isTickStreamActive, setIsTickStreamActive] = useState(true);
   // Derived counts
   const coinCount = useMemo(() => {
     const positions = useAlpacaLive ? (alpacaPositions || []) : (mockPositions || []);
@@ -992,8 +994,6 @@ export default function MarketTerminal() {
     }
     return seen.size;
   }, [useAlpacaLive, alpacaPositions, mockPositions]);
-  const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
-  const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
   const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
