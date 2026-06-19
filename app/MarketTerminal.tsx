@@ -554,7 +554,9 @@ export default function MarketTerminal() {
     lastCandleAction: string;
   }>>({});
 
-  const [autopilotInterval, setAutopilotInterval] = useState(15); // in seconds (default increased to reduce API load and false signals)
+  const [autopilotInterval, setAutopilotInterval] = useState(30); // in seconds (raised default to reduce API load and false signals)
+  // Global scanning master switch — default OFF to prevent accidental live scans
+  const [scanningEnabled, setScanningEnabled] = useState<boolean>(false);
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
   const [autopilotCryptoOnly, setAutopilotCryptoOnly] = useState<boolean>(false);
@@ -592,6 +594,13 @@ export default function MarketTerminal() {
       };
       return [newLog, ...prev].slice(0, 50);
     });
+    try {
+      // Surface autopilot events as transient toasts for better UX
+      const mapType = type === "trade" || type === "success" ? "SUCCESS" : type === "warn" ? "WARNING" : "INFO";
+      showToast(msg, mapType as "SUCCESS" | "WARNING" | "CRITICAL" | "INFO");
+    } catch (e) {
+      // ignore toast failures
+    }
   }, []);
 
   // Load persisted global TP/SL from localStorage on mount
@@ -611,7 +620,6 @@ export default function MarketTerminal() {
       const maxConcurrentStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxConcurrent");
       const maxConcurrentCryptoStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxConcurrentCrypto");
       const broadScan = typeof window !== "undefined" && localStorage.getItem("sentry:scanBroadUniverse");
-      const cryptoOnlyStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotCryptoOnly");
       const blockedMarketsStored = typeof window !== "undefined" && localStorage.getItem("sentry:blockedMarkets");
       const lossGuardStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotLossGuard");
       const tradeFormTabStored = typeof window !== "undefined" && localStorage.getItem("sentry:tradeFormTab");
@@ -676,7 +684,6 @@ export default function MarketTerminal() {
         } catch (e) {}
       }
       if (broadScan) setAutopilotScanBroadUniverse(broadScan === "true");
-      if (cryptoOnlyStored) setAutopilotCryptoOnly(cryptoOnlyStored === "true");
       if (blockedMarketsStored) {
         try { setBlockedMarkets(JSON.parse(blockedMarketsStored)); } catch (e) {}
       }
@@ -722,7 +729,6 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:liquidationBeforeCloseMin", String(liquidationBeforeCloseMin));
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
         localStorage.setItem("sentry:scanBroadUniverse", String(autopilotScanBroadUniverse));
-        localStorage.setItem("sentry:autopilotCryptoOnly", String(autopilotCryptoOnly));
         localStorage.setItem("sentry:autopilotAutoSwitchEnabled", String(autopilotAutoSwitchEnabled));
         localStorage.setItem("sentry:blockedMarkets", JSON.stringify(blockedMarkets));
         localStorage.setItem("sentry:allowLiveShorts", String(allowLiveShorts));
@@ -735,121 +741,7 @@ export default function MarketTerminal() {
     } catch (e) {}
   }, [hasLoadedPersistentSettings, autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin, autopilotLossGuard, autopilotBlacklist, tradeFormTab, isTickStreamActive]);
 
-  // Automatic ET-based toggle: after Wall Street close (16:00 ET) prefer crypto-only autopilot,
-  // and re-enable non-crypto before market open (9:30 ET). Skip automatic toggles on weekends.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    // Helper: compute whether a given ET date is a NYSE holiday. Covers common market closures.
-    const isMarketHoliday = (d: Date) => {
-      const year = d.getFullYear();
-      // normalize to date-only in ET
-      const dt = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-
-      const addDays = (base: Date, n: number) => new Date(base.getFullYear(), base.getMonth(), base.getDate() + n);
-
-      // Observed fixed-date holiday helper
-      const observed = (month: number, day: number) => {
-        const raw = new Date(year, month - 1, day);
-        const wd = raw.getDay();
-        if (wd === 6) return addDays(raw, -1); // Saturday -> observed Friday
-        if (wd === 0) return addDays(raw, 1);  // Sunday -> observed Monday
-        return raw;
-      };
-
-      // nth weekday helper (e.g., 3rd Monday of Feb)
-      const nthWeekday = (month: number, weekday: number, n: number) => {
-        const first = new Date(year, month - 1, 1);
-        const firstWd = first.getDay();
-        const day = 1 + ((7 + weekday - firstWd) % 7) + (n - 1) * 7;
-        return new Date(year, month - 1, day);
-      };
-
-      // Last Monday of month helper
-      const lastWeekday = (month: number, weekday: number) => {
-        const last = new Date(year, month, 0); // last day of month
-        const diff = (last.getDay() - weekday + 7) % 7;
-        return new Date(year, month - 1, last.getDate() - diff);
-      };
-
-      // Good Friday: compute Easter Sunday (Meeus/Jones algorithm) then subtract 2 days
-      const easterSunday = (() => {
-        const a = year % 19;
-        const b = Math.floor(year / 100);
-        const c = year % 100;
-        const d = Math.floor(b / 4);
-        const e = b % 4;
-        const f = Math.floor((b + 8) / 25);
-        const g = Math.floor((b - f + 1) / 3);
-        const h = (19 * a + b - d - g + 15) % 30;
-        const i = Math.floor(c / 4);
-        const k = c % 4;
-        const l = (32 + 2 * e + 2 * i - h - k) % 7;
-        const m = Math.floor((a + 11 * h + 22 * l) / 451);
-        const month = Math.floor((h + l - 7 * m + 114) / 31); // 3=March,4=April
-        const day = ((h + l - 7 * m + 114) % 31) + 1;
-        return new Date(year, month - 1, day);
-      })();
-      const goodFriday = addDays(easterSunday, -2);
-
-      const holidays: Date[] = [];
-      // New Year's Day
-      holidays.push(observed(1, 1));
-      // Martin Luther King Jr. Day: 3rd Monday of Jan
-      holidays.push(nthWeekday(1, 1, 3));
-      // Presidents Day: 3rd Monday of Feb
-      holidays.push(nthWeekday(2, 1, 3));
-      // Good Friday
-      holidays.push(goodFriday);
-      // Memorial Day: last Monday of May
-      holidays.push(lastWeekday(5, 1));
-      // Juneteenth (June 19 observed)
-      holidays.push(observed(6, 19));
-      // Independence Day (July 4 observed)
-      holidays.push(observed(7, 4));
-      // Labor Day: 1st Monday of Sep
-      holidays.push(nthWeekday(9, 1, 1));
-      // Thanksgiving: 4th Thursday of Nov
-      holidays.push(nthWeekday(11, 4, 4));
-      // Christmas (Dec 25 observed)
-      holidays.push(observed(12, 25));
-
-      return holidays.some(h => h.getFullYear() === dt.getFullYear() && h.getMonth() === dt.getMonth() && h.getDate() === dt.getDate());
-    };
-
-    const shouldBeCryptoOnly = () => {
-      const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-      const day = et.getDay();
-      // Force crypto-only on weekends and NYSE holidays.
-      if (day === 0 || day === 6) return true;
-      if (isMarketHoliday(et)) return true;
-      const mins = et.getHours() * 60 + et.getMinutes();
-      // After 16:00 (960) until next day's 9:30 (570) treat as Wall Street closed window
-      if (mins >= 960 || mins < 570) return true;
-      return false;
-    };
-
-    const applyCheck = () => {
-      try {
-        if (!autopilotAutoSwitchEnabled) return;
-        const target = shouldBeCryptoOnly();
-        if (target && !autopilotCryptoOnly) {
-          setAutopilotCryptoOnly(true);
-          addAutopilotLog(`Autopilot automatically switched to crypto-only after Wall Street close (ET).`, "info");
-        } else if (!target && autopilotCryptoOnly) {
-          setAutopilotCryptoOnly(false);
-          addAutopilotLog(`Autopilot automatically re-enabled non-crypto trading during Wall Street open (ET).`, "info");
-        }
-      } catch (e) {
-        // ignore
-      }
-    };
-
-    // run immediately and every minute
-    applyCheck();
-    const t = setInterval(applyCheck, 60 * 1000);
-    return () => clearInterval(t);
-  }, [autopilotCryptoOnly, autopilotAutoSwitchEnabled, addAutopilotLog]);
+  // Crypto-only auto-switch removed: non-crypto buys are allowed at all times unless explicitly blocked.
 
   useEffect(() => {
     try {
@@ -1576,10 +1468,7 @@ export default function MarketTerminal() {
         };
       }
 
-      if (curRef.autopilotCryptoOnly && side === 'BUY' && !isCrypto) {
-        addAutopilotLog(`Blocked BUY ${symbolClean}: autopilot configured for crypto-only trading.`, 'warn');
-        return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Autopilot set to crypto-only.' };
-      }
+      // crypto-only enforcement removed: allow non-crypto BUYs unless explicitly blocked by market blocks
       if (side === 'BUY') {
         if (curBlocked.crypto && isCrypto) {
           addAutopilotLog(`Blocked BUY ${symbolClean}: crypto trading is disabled by market block.`, 'warn');
@@ -3853,35 +3742,40 @@ export default function MarketTerminal() {
   }, [useAlpacaLive, handleRefreshData]);
 
   // Autopilot loop trigger
+  // Autopilot loop trigger - avoid creating duplicate intervals when callback identity changes
+  const autopilotIntervalHandleRef = useRef<NodeJS.Timeout | null>(null);
   useEffect(() => {
-    let intervalId: NodeJS.Timeout | null = null;
     const prevActive = prevAutopilotActiveRef.current;
 
     if (prevActive === null) {
-      if (isAutopilotActive) {
-        addAutopilotLog(`🔴 Sentry Autopilot trading system ACTIVATED!`, "info");
-      }
+      if (isAutopilotActive) addAutopilotLog(`🔴 Sentry Autopilot trading system ACTIVATED!`, "info");
     } else if (prevActive !== isAutopilotActive) {
-      addAutopilotLog(
-        isAutopilotActive
-          ? `🔴 Sentry Autopilot trading system ACTIVATED!`
-          : `🟢 Sentry Autopilot trading system DEACTIVATED. Intercept loops idle.`,
-        "info"
-      );
+      addAutopilotLog(isAutopilotActive ? `🔴 Sentry Autopilot trading system ACTIVATED!` : `🟢 Sentry Autopilot trading system DEACTIVATED. Intercept loops idle.`, "info");
     }
 
     prevAutopilotActiveRef.current = isAutopilotActive;
 
-    if (isAutopilotActive) {
+    // Clear any existing interval before potentially creating a new one
+    if (autopilotIntervalHandleRef.current) {
+      clearInterval(autopilotIntervalHandleRef.current);
+      autopilotIntervalHandleRef.current = null;
+    }
+
+    if (isAutopilotActive && scanningEnabled) {
+      // initial immediate scan
       executeAutopilotScan();
-      
-      intervalId = setInterval(() => {
+
+      // create a single stable interval that uses the latest scan function via a lightweight wrapper
+      autopilotIntervalHandleRef.current = setInterval(() => {
         executeAutopilotScan();
-      }, autopilotInterval * 1000);
+      }, Math.max(autopilotInterval, 5) * 1000);
     }
 
     return () => {
-      if (intervalId) clearInterval(intervalId);
+      if (autopilotIntervalHandleRef.current) {
+        clearInterval(autopilotIntervalHandleRef.current);
+        autopilotIntervalHandleRef.current = null;
+      }
     };
   }, [isAutopilotActive, autopilotInterval, executeAutopilotScan, addAutopilotLog]);
 
@@ -7344,12 +7238,18 @@ if __name__ == "__main__":
                       <p className="text-[9px] text-gray-500 mt-1">Limit concurrent open crypto positions separately.</p>
                     </div>
                     <div className="col-span-4 pt-3">
-                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Market Blocks / Crypto-Only</label>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Market Blocks</label>
                       <div className="flex flex-col gap-2">
-                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={autopilotCryptoOnly} onChange={(e) => setAutopilotCryptoOnly(e.target.checked)} />Autopilot: Crypto-only buys</label>
                         <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.wallStreet} onChange={(e) => setBlockedMarkets((s) => ({...s, wallStreet: e.target.checked}))} />Block Wall Street (NYSE/NASDAQ)</label>
                         <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.india} onChange={(e) => setBlockedMarkets((s) => ({...s, india: e.target.checked}))} />Block India (NSE/BSE)</label>
-                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.crypto} onChange={(e) => setBlockedMarkets((s) => ({...s, crypto: e.target.checked}))} />Block Crypto</label>
+                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.crypto} onChange={(e) => {
+                          const checked = e.target.checked;
+                          setBlockedMarkets((s) => ({...s, crypto: checked}));
+                          if (checked) {
+                            // Clear any crypto-only autopilot mode when user explicitly blocks crypto
+                            try { setAutopilotCryptoOnly(false); addAutopilotLog('Crypto market blocked — disabling crypto-only autopilot flag.', 'info'); } catch (er) {}
+                          }
+                        }} />Block Crypto</label>
                       </div>
                       <p className="text-[9px] text-gray-500 mt-1">Use these to prevent autopilot from opening new BUYs on the selected markets.</p>
                     </div>
@@ -7782,16 +7682,7 @@ if __name__ == "__main__":
 
                       {/* Horizontal Trading Box Levels View */}
                       <div className="space-y-1.5 bg-brand-bg/60 p-2 rounded border border-brand-border/40 text-[10px]">
-                        <div className="grid grid-cols-2 gap-2 text-[9px] border-b border-brand-border/30 pb-1.5 mb-1.5">
-                          <div className="flex justify-between gap-2">
-                            <span className="text-gray-400">Last Scan:</span>
-                            <span className="text-gray-200 font-semibold">{autopilotLastScanAtMs ? new Date(autopilotLastScanAtMs).toLocaleTimeString() : "--"}</span>
-                          </div>
-                          <div className="flex justify-between gap-2">
-                            <span className="text-gray-400">Next Scan In:</span>
-                            <span className="text-sky-300 font-semibold">{autopilotNextScanInSec !== null ? `${autopilotNextScanInSec}s` : "--"}</span>
-                          </div>
-                        </div>
+                        {/* Scanning display removed to reduce visual churn */}
                         <span className="text-gray-500 text-[8px] uppercase tracking-wider font-extrabold block mb-1">📐 TRADING BOX HORIZONTAL CHANNELS</span>
                         
                         {/* Swing High */}
