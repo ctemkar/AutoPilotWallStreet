@@ -2757,7 +2757,14 @@ export default function MarketTerminal() {
       setAutopilotScanError(null);
       setAutopilotScanErrorCount(0);
 
-      for (const targetSymbol of orderedScanTargets) {
+      // Limit how many distinct symbols we attempt per scan to avoid rapid multi-symbol bursts.
+      // When broad-universe scanning is disabled we only process a single target each scan
+      // so the `autopilotInterval` pause is effective. If broad-universe is enabled, allow
+      // a small batch to rotate through the quick tickers.
+      const maxTargetsPerScan = autopilotScanBroadUniverse ? 5 : 1;
+      const processedScanTargets = orderedScanTargets.slice(0, Math.max(1, Math.min(orderedScanTargets.length, maxTargetsPerScan)));
+
+      for (const targetSymbol of processedScanTargets) {
         setAutopilotCurrentScanTarget(targetSymbol);
         const matchedForStats = currentActivePositions.find((p) => p.symbol === targetSymbol);
         const scanPrice = matchedForStats?.current_price || (targetSymbol === "BTCUSD" ? 67200.0 : targetSymbol === "ETHUSD" ? 3800.0 : 150.0);
