@@ -1050,7 +1050,11 @@ export default function MarketTerminal() {
 
   const isCryptoSymbol = useCallback((s: string) => {
     if (!s) return false;
-    const u = String(s).toUpperCase().trim();
+    let u = String(s).toUpperCase().trim().replace(/[^A-Z0-9]/g, "");
+    // normalize common crypto shorthands such as ETHD -> ETHUSDT
+    if (u.endsWith("D") && !u.endsWith("USD") && u.length > 1) {
+      u = `${u.slice(0, -1)}USDT`;
+    }
     // treat obvious pairs and suffixes; avoid broad substring matches
     if (u.endsWith("USD") || u.endsWith("USDT")) return true;
     const explicit = ["BTCUSD","ETHUSD","BTCUSDT","ETHUSDT","LTCUSD","XRPUSD","DOGEUSD","ETHBTC","BTCETH"];
@@ -4665,8 +4669,21 @@ export default function MarketTerminal() {
             let preferredSource: "futures" | "spot" | "none" = "none";
             const pref = await fetchBinanceFundingSnapshot();
             const prefUsdt = pref.usdt;
-            preferredUsdt = prefUsdt;
-            preferredSource = pref.source;
+            const prefSource = pref.source === "futures" ? "futures" : "none";
+            preferredUsdt = prefSource === "futures" ? prefUsdt : 0;
+            preferredSource = prefSource;
+            if (prefSource !== "futures") {
+              addAutopilotLog(`Blocked ${symbolClean}: Binance futures USDT funding required. Current source = ${pref.source}.`, "warn");
+              return {
+                status: "BLOCKED",
+                code: "BLOCKED_INSUFFICIENT_USDT",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: `Binance futures USDT funding required. Current source = ${pref.source}.`,
+              } as any;
+            }
             if (prefUsdt > 0) {
               maxSafeOrderVal = prefUsdt * 0.9;
             }
