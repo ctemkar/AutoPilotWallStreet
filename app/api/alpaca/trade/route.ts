@@ -27,10 +27,17 @@ function isExtendedUsSession(etNow: Date): boolean {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    // Prefer explicit keys passed in the request body, but fall back to server env vars if omitted.
-    const apiKey = body.apiKey || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || "";
-    const apiSecret = body.apiSecret || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_PAPER_API_SECRET || "";
     const { isPaper, symbol, qty, side, notional, estimatedPrice } = body;
+    const apiKey = body.apiKey
+      || (isPaper
+        ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY
+        : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_PAPER_API_KEY)
+      || "";
+    const apiSecret = body.apiSecret
+      || (isPaper
+        ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET
+        : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_PAPER_API_SECRET)
+      || "";
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(

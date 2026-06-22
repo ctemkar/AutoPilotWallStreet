@@ -406,11 +406,29 @@ export default function MarketTerminal() {
 
   // Dynamic Toast alerts notification system
   const [toasts, setToasts] = useState<{ id: string; message: string; type: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO" }[]>([]);
+  const toastHistoryRef = useRef<Record<string, number>>({});
+  const lastToastAtRef = useRef<number>(0);
 
   const showToast = useCallback((message: string, type: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO" = "INFO") => {
-    const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    setToasts((prev) => [...prev, { id, message, type }]);
-    
+    const now = Date.now();
+    const key = `${type}:${message}`;
+    const lastShown = toastHistoryRef.current[key] || 0;
+
+    // Avoid repeated toasts for the same message within 5 seconds.
+    if (now - lastShown < 5000) return;
+
+    // Throttle INFO toasts to avoid noisy status updates.
+    if (type === "INFO" && now - lastToastAtRef.current < 1500) return;
+
+    toastHistoryRef.current[key] = now;
+    lastToastAtRef.current = now;
+
+    const id = `toast-${now}-${Math.random().toString(36).substring(2, 9)}`;
+    setToasts((prev) => {
+      const next = [...prev, { id, message, type }];
+      return next.slice(-4); // keep latest 4 active toasts only
+    });
+
     // Automatically dismiss toast after 4 seconds
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -435,8 +453,10 @@ export default function MarketTerminal() {
       };
       setLogs((prev) => [newLog, ...prev].slice(0, 50));
 
-      // Automatically trigger visual Toast notification for user action/system logs
-      showToast(`${symbol} • ${action}: ${message}`, status);
+      // Only show toasts for warnings or critical issues to reduce spam.
+      if (status !== "INFO") {
+        showToast(`${symbol} • ${action}: ${message}`, status);
+      }
     },
     [showToast]
   );
@@ -3954,7 +3974,8 @@ export default function MarketTerminal() {
         } finally {
           setIsConnecting(false);
         }
-      } else if (savedUseAlpaca && savedBrokerType === "ALPACA" && savedApiKey && savedApiSecret) {
+      } else if (savedUseAlpaca && savedBrokerType === "ALPACA") {
+        const hasSavedClientKeys = !!savedApiKey && !!savedApiSecret;
         setLogs([
           {
             id: `boot-${Date.now()}-1`,
@@ -3969,17 +3990,22 @@ export default function MarketTerminal() {
             timestamp: ts,
             symbol: "ALPACA",
             action: "AUTO_CONNECT",
-            message: `Auto-connecting using stored keys to Alpaca ${savedIsPaper ? "Paper" : "Live"}...`,
+            message: `Auto-connecting using ${hasSavedClientKeys ? "stored keys" : "server-side credentials"} to Alpaca ${effectiveIsPaper ? "Paper" : "Live"}...`,
             status: "INFO"
           }
         ]);
 
         setIsConnecting(true);
         try {
+          const payload: any = { isPaper: effectiveIsPaper };
+          if (savedApiKey && savedApiSecret) {
+            payload.apiKey = savedApiKey;
+            payload.apiSecret = savedApiSecret;
+          }
           const response = await fetch("/api/alpaca", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ apiKey: savedApiKey, apiSecret: savedApiSecret, isPaper: savedIsPaper }),
+            body: JSON.stringify(payload),
           });
 
           const resText = await response.text();
