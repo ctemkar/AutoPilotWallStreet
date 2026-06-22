@@ -3852,6 +3852,28 @@ export default function MarketTerminal() {
     const ts = new Date().toLocaleTimeString();
 
     const initApp = async () => {
+      let effectiveIsPaper = savedIsPaper === null ? true : savedIsPaper;
+
+      if (savedIsPaper === null) {
+        try {
+          const resp = await fetch("/api/alpaca/inspect");
+          if (resp.ok) {
+            const info = await resp.json();
+            const present = info?.envKeysPresent || {};
+            const hasLive = !!present.ALPACA_LIVE_API_KEY || !!present.ALPACA_LIVE_API_SECRET || !!present.ALPACA_API_KEY || !!present.ALPACA_API_SECRET || !!present.ALPACA_KEY || !!present.ALPACA_SECRET;
+            const hasPaper = !!present.ALPACA_PAPER_API_KEY || !!present.ALPACA_PAPER_API_SECRET;
+            if (hasLive && !hasPaper) {
+              effectiveIsPaper = false;
+              setIsPaper(false);
+              localStorage.setItem("APCA_IS_PAPER", "false");
+              addLog("ALPACA", "AUTO_SWITCH", "No paper keys found on server; defaulting Alpaca mode to Live.", "INFO");
+            }
+          }
+        } catch (e) {
+          // ignore detection failures — keep defaults
+        }
+      }
+
       if (savedUseAlpaca && savedBrokerType === "ANGELONE" && savedAngelApiKey && savedAngelClientCode && savedAngelMpin) {
         setLogs([
           {
@@ -4138,9 +4160,11 @@ export default function MarketTerminal() {
       setIsConnected(true);
       setUseAlpacaLive(true);
 
-      // Persist values
-      localStorage.setItem("APCA_API_KEY", apiKey);
-      localStorage.setItem("APCA_API_SECRET", apiSecret);
+      // Persist values when explicit Alpaca keys were supplied by the user.
+      if (apiKey && apiSecret) {
+        localStorage.setItem("APCA_API_KEY", apiKey);
+        localStorage.setItem("APCA_API_SECRET", apiSecret);
+      }
       localStorage.setItem("APCA_IS_PAPER", String(isPaper));
       localStorage.setItem("APCA_USE_ALPACA", "true");
 
