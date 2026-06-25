@@ -17,25 +17,48 @@ function resolveAlpacaCredentials(body: any) {
   const { isPaper } = body || {};
   const apiKey = body?.apiKey
     || (isPaper
-      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY
-      : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_PAPER_API_KEY)
+      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_LIVE_API_KEY
+      : process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_PAPER_API_KEY)
     || "";
   const apiSecret = body?.apiSecret
     || (isPaper
-      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET
-      : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_PAPER_API_SECRET)
+      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_LIVE_API_SECRET
+      : process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_PAPER_API_SECRET)
     || "";
-  return { apiKey, apiSecret, isPaper: !!isPaper };
+  const source = body?.apiKey
+    ? "request"
+    : isPaper
+      ? process.env.ALPACA_PAPER_API_KEY
+        ? "ALPACA_PAPER_API_KEY"
+        : process.env.ALPACA_API_KEY
+          ? "ALPACA_API_KEY"
+          : process.env.ALPACA_KEY
+            ? "ALPACA_KEY"
+            : process.env.ALPACA_LIVE_API_KEY
+              ? "ALPACA_LIVE_API_KEY"
+              : "none"
+      : process.env.ALPACA_KEY
+        ? "ALPACA_KEY"
+        : process.env.ALPACA_LIVE_API_KEY
+          ? "ALPACA_LIVE_API_KEY"
+          : process.env.ALPACA_API_KEY
+            ? "ALPACA_API_KEY"
+            : process.env.ALPACA_PAPER_API_KEY
+              ? "ALPACA_PAPER_API_KEY"
+              : "none";
+  return { apiKey, apiSecret, isPaper: !!isPaper, source };
 }
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { apiKey, apiSecret, isPaper } = resolveAlpacaCredentials(body);
+    const { apiKey, apiSecret, isPaper, source } = resolveAlpacaCredentials(body);
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
-        { error: "API Key or Secret missing on server. Add ALPACA_* keys to .env.local and restart the dev server." },
+        {
+          error: "API Key or Secret missing on server. Add ALPACA_KEY/ALPACA_SECRET for the live API or ALPACA_PAPER_API_KEY/ALPACA_PAPER_API_SECRET for the paper API to .env.local, then restart the dev server.",
+        },
         { status: 200 }
       );
     }
@@ -70,8 +93,11 @@ export async function POST(req: Request) {
     const accountRes = accountResult.value;
     if (!accountRes.ok) {
       const errorText = await accountRes.text();
+      const guidance = accountRes.status === 401
+        ? " This looks like a 401 Unauthorized from Alpaca. If you are using paper mode, verify your ALPACA_PAPER_API_KEY/ALPACA_PAPER_API_SECRET values. If you are using live mode, verify ALPACA_LIVE_API_KEY/ALPACA_LIVE_API_SECRET. If you are relying on generic ALPACA_KEY/ALPACA_SECRET, ensure those credentials match the selected mode."
+        : "";
       return NextResponse.json(
-        { error: `Alpaca authenticating error: ${errorText || accountRes.statusText}` },
+        { error: `Alpaca authenticating error: ${errorText || accountRes.statusText}.${guidance}` },
         { status: 200 }
       );
     }

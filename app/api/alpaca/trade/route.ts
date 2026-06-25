@@ -41,18 +41,20 @@ export async function POST(req: Request) {
     const { isPaper, symbol, qty, side, notional, estimatedPrice } = body;
     const apiKey = body.apiKey
       || (isPaper
-        ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY
-        : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_PAPER_API_KEY)
+        ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_LIVE_API_KEY
+        : process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_PAPER_API_KEY)
       || "";
     const apiSecret = body.apiSecret
       || (isPaper
-        ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET
-        : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_PAPER_API_SECRET)
+        ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_LIVE_API_SECRET
+        : process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_PAPER_API_SECRET)
       || "";
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
-        { error: "API credentials are missing." },
+        {
+          error: "API credentials are missing. Set ALPACA_KEY/ALPACA_SECRET for live mode or ALPACA_PAPER_API_KEY/ALPACA_PAPER_API_SECRET for paper mode.",
+        },
         { status: 200 }
       );
     }

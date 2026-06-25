@@ -2511,8 +2511,8 @@ export default function MarketTerminal() {
       // Limit how many distinct symbols we attempt per scan to avoid rapid multi-symbol bursts.
       // When broad-universe scanning is disabled we only process a single target each scan
       // so the `autopilotInterval` pause is effective. If broad-universe is enabled, allow
-      // a small batch to rotate through the quick tickers.
-      const maxTargetsPerScan = autopilotScanBroadUniverse ? 5 : 1;
+      // a larger batch so the system cycles through more of the 200-stock universe faster.
+      const maxTargetsPerScan = autopilotScanBroadUniverse ? 50 : 1;
       const processedScanTargets = orderedScanTargets.slice(0, Math.max(1, Math.min(orderedScanTargets.length, maxTargetsPerScan)));
 
       for (const targetSymbol of processedScanTargets) {
@@ -3585,24 +3585,24 @@ export default function MarketTerminal() {
     const initApp = async () => {
       let effectiveIsPaper = savedIsPaper === null ? true : savedIsPaper;
 
-      if (savedIsPaper === null) {
-        try {
-          const resp = await fetch("/api/alpaca/inspect");
-          if (resp.ok) {
-            const info = await resp.json();
-            const present = info?.envKeysPresent || {};
-            const hasLive = !!present.ALPACA_LIVE_API_KEY || !!present.ALPACA_LIVE_API_SECRET || !!present.ALPACA_API_KEY || !!present.ALPACA_API_SECRET || !!present.ALPACA_KEY || !!present.ALPACA_SECRET;
-            const hasPaper = !!present.ALPACA_PAPER_API_KEY || !!present.ALPACA_PAPER_API_SECRET;
-            if (hasLive && !hasPaper) {
+      try {
+        const resp = await fetch("/api/alpaca/inspect");
+        if (resp.ok) {
+          const info = await resp.json();
+          const present = info?.envKeysPresent || {};
+          const hasLive = !!present.ALPACA_LIVE_API_KEY || !!present.ALPACA_LIVE_API_SECRET || !!present.ALPACA_API_KEY || !!present.ALPACA_API_SECRET || !!present.ALPACA_KEY || !!present.ALPACA_SECRET;
+          const hasPaper = !!present.ALPACA_PAPER_API_KEY || !!present.ALPACA_PAPER_API_SECRET;
+          if (hasLive && !hasPaper) {
+            if (effectiveIsPaper) {
               effectiveIsPaper = false;
               setIsPaper(false);
               localStorage.setItem("APCA_IS_PAPER", "false");
               addLog("ALPACA", "AUTO_SWITCH", "No paper keys found on server; defaulting Alpaca mode to Live.", "INFO");
             }
           }
-        } catch (e) {
-          // ignore detection failures — keep defaults
         }
+      } catch (e) {
+        // ignore detection failures — keep defaults
       }
 
       setLogs([
