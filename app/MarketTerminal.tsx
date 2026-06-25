@@ -633,8 +633,8 @@ export default function MarketTerminal() {
 
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(65); // percent of portfolio per symbol
-  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(5); // concurrent open positions
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(90); // percent of portfolio per symbol
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(6); // concurrent open positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum live order size
@@ -1040,8 +1040,8 @@ export default function MarketTerminal() {
     const cashValue = isAlpaca ? parseFloat(curRef.alpacaAccount?.cash || "0") : parseFloat(curRef.simCash as any || 0);
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
-    const exposureCap = Math.min(Math.max(30, curRef.maxExposurePercentPerSymbol || 65), 70);
-    const baseExposurePct = isAlpaca ? 20 : 15;
+    const exposureCap = Math.min(Math.max(60, curRef.maxExposurePercentPerSymbol || 65), 90);
+    const baseExposurePct = isAlpaca ? 35 : 25;
     let exposurePct = baseExposurePct;
 
     if (stats) {
@@ -1631,7 +1631,7 @@ export default function MarketTerminal() {
           // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
           const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
           const effectiveAllowedPower = Math.max(0, maxAllowedPower);
-          const maxSafeOrderVal = effectiveAllowedPower * 0.90; // enforce a 10% safety collar/buffer for fractional buy orders
+          const maxSafeOrderVal = effectiveAllowedPower * 0.96; // enforce a smaller safety collar for fractional buy orders
 
           if (effectiveAllowedPower <= 0) {
             addAutopilotLog(`Blocked live automated BUY: account buying power is unavailable or negative (${maxAllowedPower.toFixed(2)}).`, "warn");
