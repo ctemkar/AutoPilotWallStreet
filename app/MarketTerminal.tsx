@@ -762,11 +762,7 @@ export default function MarketTerminal() {
       // ignore
       setHasLoadedPersistentSettings(true);
     }
-  }, [addAutopilotLog, addLog]);
-
-  // Persist autopilot interval when it changes
-  useEffect(() => {
-    try {
+  }, []);
       if (typeof window !== "undefined") {
         localStorage.setItem("sentry:autopilotInterval", String(autopilotInterval));
         localStorage.setItem("sentry:autopilotFailurePauseSeconds", String(autopilotFailurePauseSeconds));
@@ -951,6 +947,7 @@ export default function MarketTerminal() {
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
   const networkFailureStrikeRef = useRef<number>(0);
   const networkFailureResumeAtRef = useRef<number>(0);
+  const networkFailurePauseLogRef = useRef<number>(0);
   const autopilotFailureStrikeRef = useRef<number>(0);
   const lastErrorOutcomeAtRef = useRef<number>(0);;
   const autopilotPositionOpenedAtRef = useRef<Record<string, { openedAt: number; entryPrice: number }>>({});
@@ -2256,7 +2253,8 @@ export default function MarketTerminal() {
           rawErrorMsg.includes("failed to fetch") ||
           rawErrorMsg.includes("networkerror") ||
           rawErrorMsg.includes("load failed") ||
-          rawErrorMsg.includes("network request failed");
+          rawErrorMsg.includes("network request failed") ||
+          rawErrorMsg.includes("timed out");
         if (side === "BUY" && rawErrorMsg.includes("insufficient buying power")) {
           const cooldownMs = 3 * 60 * 1000;
           autopilotBuyCooldownUntilRef.current[symbolClean] = Date.now() + cooldownMs;
@@ -2270,7 +2268,14 @@ export default function MarketTerminal() {
         if (isNetworkFetchFailure && curRef.useAlpacaLive) {
           networkFailureStrikeRef.current += 1;
           const strikes = networkFailureStrikeRef.current;
-          addAutopilotLog(`Network hiccup (strike ${strikes}/3) for ${symbolClean} — skipping this tick, will retry.`, "warn");
+          if (strikes >= 3) {
+            networkFailureResumeAtRef.current = Date.now() + AUTOPILOT_FAILURE_PAUSE_MS;
+            networkFailurePauseLogRef.current = networkFailureResumeAtRef.current;
+            setAutopilotScanError(`Network issue detected; autopilot paused for ${Math.floor(AUTOPILOT_FAILURE_PAUSE_MS / 1000)}s.`);
+            addAutopilotLog(`Network connectivity issue detected. Pausing autopilot scans for ${Math.floor(AUTOPILOT_FAILURE_PAUSE_MS / 1000)}s to allow recovery.`, "warn");
+          } else {
+            addAutopilotLog(`Network hiccup (strike ${strikes}/3) for ${symbolClean} — skipping this tick, will retry.`, "warn");
+          }
         } else {
           // Successful non-network request resets the strike counter
           networkFailureStrikeRef.current = 0;
@@ -2765,11 +2770,26 @@ export default function MarketTerminal() {
     setTimeout(() => setToast(null), 4000);
   }, [executeAutopilotOrder, addAutopilotLog, logScanOrderOutcome]);
 
+  const autopilotRunningRef = useRef(false);
+
   const executeAutopilotScan = useCallback(async () => {
+    if (autopilotRunningRef.current) return;
+    const now = Date.now();
+    const pauseUntil = networkFailureResumeAtRef.current;
+    if (pauseUntil > now) {
+      if (networkFailurePauseLogRef.current !== pauseUntil) {
+        const eta = new Date(pauseUntil).toLocaleTimeString();
+        addAutopilotLog(`Autopilot scan suspended due to recent network failures. Resuming at ${eta}.`, "warn");
+        setAutopilotScanError(`Network pause until ${eta}.`);
+        networkFailurePauseLogRef.current = pauseUntil;
+      }
+      return;
+    }
+    networkFailurePauseLogRef.current = 0;
+    autopilotRunningRef.current = true;
     const curRef = stateRef.current;
-    if (curRef.isAutopilotRunning) return;
     setIsAutopilotRunning(true);
-    setAutopilotLastScanAtMs(Date.now());
+    setAutopilotLastScanAtMs(now);
     setAutopilotNextScanInSec(Math.max(0, autopilotInterval));
     addAutopilotLog(`Executing Autopilot scan (${curRef.useAlpacaLive ? "Live-Alpaca Client" : "Simulator Model"})...`, "info");
 
@@ -2783,6 +2803,18 @@ export default function MarketTerminal() {
       const currentLeverageValue = currentTotalEquity > 0 ? currentGrossExposure / currentTotalEquity : 0;
       const currentMaintMargin = currentActivePositions.reduce((sum, pos) => sum + (pos.current_price * Math.abs(pos.qty) * pos.maintenance_margin_rate), 0);
       const currentCapacity = currentTotalEquity > 0 ? (currentMaintMargin / currentTotalEquity) * 100 : 0;
+
+      const currentOpenCounts = computeOpenCounts(currentActivePositions);
+      const maxOpenPositions = curRef.maxConcurrentPositions || 999;
+      if (curRef.useAlpacaLive && currentOpenCounts.all >= maxOpenPositions) {
+        setAutopilotScanTotalTargets(0);
+        setAutopilotScanProcessedCount(0);
+        setAutopilotCurrentScanTarget(null);
+        setAutopilotScanError(`Autopilot scan paused: ${currentOpenCounts.all} open positions have reached the configured concurrent limit of ${maxOpenPositions}.`);
+        setAutopilotScanErrorCount((prev) => prev + 1);
+        addAutopilotLog(`Autopilot paused because open position count (${currentOpenCounts.all}) meets or exceeds the concurrent cap (${maxOpenPositions}).`, "warn");
+        return;
+      }
 
       const parsedTargets = (curRef.autopilotTargetTicker || "AAPL")
         .split(/[\s,]+/)
@@ -3783,8 +3815,9 @@ export default function MarketTerminal() {
     console.error(err);
     addAutopilotLog(`Scan tick interrupted: ${err.message || err}`, "warn");
   } finally {
+      autopilotRunningRef.current = false;
       setIsAutopilotRunning(false);
-    }
+  }
   }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, setElliottState, addAutopilotLog, logScanOrderOutcome, quickTickers, autopilotInterval, autopilotScanBroadUniverse, recordMarketStat, getAutopilotTradeQty, isCryptoSymbol]);
 
   useEffect(() => {

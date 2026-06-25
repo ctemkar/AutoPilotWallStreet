@@ -1,6 +1,17 @@
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+const FETCH_TIMEOUT_MS = 12000;
+
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function isCryptoSymbol(sym: string): boolean {
   return /(BTCUSD|ETHUSD|LTCUSD|BCHUSD|SOLUSD|DOGEUSD|AVAXUSD)$/i.test(sym);
@@ -105,11 +116,23 @@ export async function POST(req: Request) {
       payload.extended_hours = true;
     }
 
-    const orderRes = await fetch(`${baseUrl}/v2/orders`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
+    let orderRes: Response;
+    try {
+      orderRes = await fetchWithTimeout(`${baseUrl}/v2/orders`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+    } catch (error: any) {
+      const errMsg = error?.name === "AbortError"
+        ? `Alpaca request timed out after ${FETCH_TIMEOUT_MS}ms.`
+        : error?.message || "Failed to reach Alpaca order endpoint.";
+      console.error("Alpaca order fetch error:", errMsg);
+      return NextResponse.json(
+        { error: `Alpaca order proxy error: ${errMsg}` },
+        { status: 200 }
+      );
+    }
 
     if (!orderRes.ok) {
       const status = orderRes.status;

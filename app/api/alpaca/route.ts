@@ -1,21 +1,37 @@
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+const FETCH_TIMEOUT_MS = 12000;
+
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function resolveAlpacaCredentials(body: any) {
+  const { isPaper } = body || {};
+  const apiKey = body?.apiKey
+    || (isPaper
+      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY
+      : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_PAPER_API_KEY)
+    || "";
+  const apiSecret = body?.apiSecret
+    || (isPaper
+      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET
+      : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_PAPER_API_SECRET)
+    || "";
+  return { apiKey, apiSecret, isPaper: !!isPaper };
+}
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { isPaper } = body || {};
-    const apiKey = body?.apiKey
-      || (isPaper
-        ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY
-        : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_PAPER_API_KEY)
-      || "";
-    const apiSecret = body?.apiSecret
-      || (isPaper
-        ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET
-        : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_PAPER_API_SECRET)
-      || "";
+    const { apiKey, apiSecret, isPaper } = resolveAlpacaCredentials(body);
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
@@ -35,12 +51,23 @@ export async function POST(req: Request) {
       "User-Agent": "Alpaca-Margin-Terminal/1.0",
     };
 
-    // Fetch account info and positions concurrently
-    const [accountRes, positionsRes] = await Promise.all([
-      fetch(`${baseUrl}/v2/account`, { headers, cache: "no-store" }),
-      fetch(`${baseUrl}/v2/positions`, { headers, cache: "no-store" }),
+    const [accountResult, positionsResult] = await Promise.allSettled([
+      fetchWithTimeout(`${baseUrl}/v2/account`, { headers, cache: "no-store" }),
+      fetchWithTimeout(`${baseUrl}/v2/positions`, { headers, cache: "no-store" }),
     ]);
 
+    if (accountResult.status === "rejected") {
+      const errMsg = accountResult.reason?.name === "AbortError"
+        ? `Alpaca account request timed out after ${FETCH_TIMEOUT_MS}ms.`
+        : accountResult.reason?.message || String(accountResult.reason || "Unknown Alpaca account fetch failure.");
+      console.error("Alpaca account fetch error:", errMsg);
+      return NextResponse.json(
+        { error: `Unable to reach Alpaca account endpoint: ${errMsg}` },
+        { status: 200 }
+      );
+    }
+
+    const accountRes = accountResult.value;
     if (!accountRes.ok) {
       const errorText = await accountRes.text();
       return NextResponse.json(
@@ -50,11 +77,17 @@ export async function POST(req: Request) {
     }
 
     const accountData = await accountRes.json();
-    let positionsData = [];
-    if (positionsRes.ok) {
-      positionsData = await positionsRes.json();
+
+    let positionsData: any[] = [];
+    if (positionsResult.status === "fulfilled") {
+      const positionsRes = positionsResult.value;
+      if (positionsRes.ok) {
+        positionsData = await positionsRes.json();
+      } else {
+        console.warn("Alpaca positions fetch failed:", positionsRes.status, positionsRes.statusText);
+      }
     } else {
-      console.error("Alpaca positions fetch failed, defaulting to empty");
+      console.warn("Alpaca positions fetch error:", positionsResult.reason?.message || positionsResult.reason);
     }
 
     return NextResponse.json({

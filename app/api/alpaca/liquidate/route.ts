@@ -1,6 +1,17 @@
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+const FETCH_TIMEOUT_MS = 12000;
+
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function POST(req: Request) {
   try {
@@ -42,10 +53,22 @@ export async function POST(req: Request) {
       ? `${baseUrl}/v2/positions/${encodeURIComponent(symbolClean)}`
       : `${baseUrl}/v2/positions`;
 
-    const closeRes = await fetch(closeUrl, {
-      method: "DELETE",
-      headers,
-    });
+    let closeRes: Response;
+    try {
+      closeRes = await fetchWithTimeout(closeUrl, {
+        method: "DELETE",
+        headers,
+      });
+    } catch (error: any) {
+      const errMsg = error?.name === "AbortError"
+        ? `Alpaca request timed out after ${FETCH_TIMEOUT_MS}ms.`
+        : error?.message || "Failed to reach Alpaca liquidation endpoint.";
+      console.error("Alpaca liquidation fetch error:", errMsg);
+      return NextResponse.json(
+        { error: `Alpaca liquidation proxy error: ${errMsg}` },
+        { status: 200 }
+      );
+    }
 
     if (!closeRes.ok) {
       const errorText = await closeRes.text();
