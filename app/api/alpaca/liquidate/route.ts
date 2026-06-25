@@ -78,7 +78,10 @@ export async function POST(req: Request) {
       } catch {
         parsedErr = null;
       }
-      const message = parsedErr?.message || errorText || "Alpaca rejected liquidation request.";
+      let message = parsedErr?.message || errorText || "Alpaca rejected liquidation request.";
+      if (/insufficient qty available for order/i.test(String(message))) {
+        message = "Alpaca cannot cover this short position because no borrowable shares are available right now.";
+      }
       return NextResponse.json(
         { error: `Alpaca liquidation rejection: ${message}` },
         { status: 200 }

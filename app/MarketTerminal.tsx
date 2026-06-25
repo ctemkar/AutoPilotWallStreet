@@ -276,8 +276,8 @@ function getMarketSessionET(): "OPEN" | "EXTENDED" | "CLOSED" {
 }
 
 export default function MarketTerminal() {
-  // Broker selection and credentials (Default to US Alpaca market)
-  const [brokerType, setBrokerType] = useState<"ALPACA" | "ANGELONE">("ALPACA");
+  // Broker selection fixed to Alpaca US market only
+  const brokerType = "ALPACA" as const;
 
   // Market-hours tracking
   const [marketSession, setMarketSession] = useState<"OPEN" | "EXTENDED" | "CLOSED">(getMarketSessionET);
@@ -338,6 +338,11 @@ export default function MarketTerminal() {
   // Alpaca States API key configuration
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
+  const angelApiKey = "";
+  const angelClientCode = "";
+  const angelMpin = "";
+  const angelTotpSeed = "";
+  const angelUseServerCreds = false;
   const [showApiSecret, setShowApiSecret] = useState(false);
   const [isPaper, setIsPaper] = useState(true);
   const [useAlpacaLive, setUseAlpacaLive] = useState(true);
@@ -347,13 +352,6 @@ export default function MarketTerminal() {
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
-
-  // Angel One (SmartAPI Indian Market) Configuration
-  const [angelApiKey, setAngelApiKey] = useState("");
-  const [angelClientCode, setAngelClientCode] = useState("");
-  const [angelMpin, setAngelMpin] = useState("");
-  const [angelTotpSeed, setAngelTotpSeed] = useState("");
-  const [angelUseServerCreds, setAngelUseServerCreds] = useState(false);
 
   // Connection & loading flags
   const [isConnecting, setIsConnecting] = useState(false);
@@ -625,7 +623,7 @@ export default function MarketTerminal() {
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
-  const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean; india: boolean }>({ wallStreet: false, india: false });
+  const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean }>({ wallStreet: false });
   const [autopilotAutoSwitchEnabled, setAutopilotAutoSwitchEnabled] = useState<boolean>(true);
   const [activeVisualizerSymbol] = useState<string>("");
 
@@ -744,7 +742,6 @@ export default function MarketTerminal() {
           const parsed = JSON.parse(blockedMarketsStored);
           setBlockedMarkets({
             wallStreet: !!parsed.wallStreet,
-            india: !!parsed.india,
           });
         } catch (e) {}
       }
@@ -1032,24 +1029,44 @@ export default function MarketTerminal() {
     return 8;
   }, []);
 
-  // Calculate autopilot trade quantity based on broker type, symbol, and trend strength
+  // Calculate autopilot trade quantity based on portfolio exposure, symbol price, and trend strength
   const getAutopilotTradeQty = useCallback((symbol: string, isAlpaca: boolean) => {
-    const baseQty = isAlpaca ? 20 : 15;
-
+    const curRef = stateRef.current;
     const stats = autopilotMarketStatsRef.current[symbol];
-    if (!stats) {
-      return parseFloat(baseQty.toFixed(2));
+    const currentPrice = stats?.price || (symbol === "BTCUSD" ? 67200 : 150);
+
+    const activePositions = isAlpaca ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
+    const totalPosValue = activePositions.reduce((sum: number, p: any) => sum + Math.abs(p.current_price * (parseFloat((p.qty || 0).toString()) || 0)), 0);
+    const cashValue = isAlpaca ? parseFloat(curRef.alpacaAccount?.cash || "0") : parseFloat(curRef.simCash as any || 0);
+    const totalPortfolio = Math.max(1, totalPosValue + cashValue);
+
+    const exposureCap = Math.min(Math.max(30, curRef.maxExposurePercentPerSymbol || 65), 70);
+    const baseExposurePct = isAlpaca ? 20 : 15;
+    let exposurePct = baseExposurePct;
+
+    if (stats) {
+      const trendBoost = Math.max(0, stats.trendStrength - 0.45) * 0.8;
+      const edgeBoost = Math.max(0, stats.expectedEdgeBps / 100) * 0.25;
+      const chopPenalty = stats.chopScore > 0.6 ? 0.85 : 1;
+      const atrPenalty = stats.atrPct > 3 ? 0.92 : 1;
+
+      exposurePct = baseExposurePct * Math.min(2.0, 1 + trendBoost + edgeBoost) * chopPenalty * atrPenalty;
     }
 
-    const trendBoost = Math.max(0, stats.trendStrength - 0.45) * 0.8;
-    const edgeBoost = Math.max(0, stats.expectedEdgeBps / 100) * 0.2;
-    const chopPenalty = stats.chopScore > 0.6 ? 0.85 : 1;
-    const atrPenalty = stats.atrPct > 3 ? 0.92 : 1;
+    exposurePct = Math.min(exposureCap, Math.max(baseExposurePct * 0.75, exposurePct));
+    const targetValue = totalPortfolio * (exposurePct / 100);
+    const qtyFromExposure = targetValue / currentPrice;
 
-    const multiplier = Math.min(2.5, 1 + trendBoost + edgeBoost) * chopPenalty * atrPenalty;
-    const adjustedQty = Math.max(baseQty, baseQty * multiplier);
+    const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
+    const baseQty = isAlpaca ? 20 : 15;
+    let qty = Math.max(minQty, qtyFromExposure);
+    qty = Math.max(qty, baseQty);
 
-    return parseFloat(adjustedQty.toFixed(2));
+    if (symbol === "BTCUSD") {
+      return parseFloat(qty.toFixed(4));
+    }
+
+    return parseFloat(Math.max(minQty, Math.round(qty)).toFixed(2));
   }, []);
 
   const ensureDailyGuardWindow = useCallback(() => {
@@ -1110,139 +1127,73 @@ export default function MarketTerminal() {
     if (!useAlpacaLive) return;
     setIsRefreshing(true);
     try {
-
-      if (brokerType === "ANGELONE") {
-        const response = await fetch("/api/angelone", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            angelApiKey,
-            angelClientCode,
-            angelMpin,
-            angelTotpSeed,
-            isMockConnection: false,
-            useServerCreds: angelUseServerCreds
-          })
-        });
-
-        const resText = await response.text();
-        let rawData: any = null;
-        try {
-          rawData = JSON.parse(resText);
-        } catch (e) {
-          throw new Error(`Server returned error: ${resText.slice(0, 120).trim()}...`);
-        }
-
-        if (!response.ok || rawData?.error) {
-          throw new Error(rawData?.error || "Unable to sync holdings.");
-        }
-
-        setAlpacaAccount(rawData.account);
-        const mergedPositions = await mergeBinanceSpotIntoPositions(rawData.positions || []);
-        setAlpacaPositions(mergedPositions);
-        {
-          const refreshedQtyBySymbol: Record<string, number> = {};
-          for (const p of (mergedPositions || [])) {
-            const sym = String(p?.symbol || "").toUpperCase();
-            if (!sym) continue;
-            refreshedQtyBySymbol[sym] = Number(p?.qty || 0);
-          }
-          const pendingSymbols = Array.from(autopilotPendingBuySymbolsRef.current);
-          for (const sym of pendingSymbols) {
-            const meta = autopilotPendingBuyMetaRef.current[sym];
-            const currentQty = refreshedQtyBySymbol[sym] || 0;
-            const baseQty = meta?.baseQty ?? 0;
-            if (currentQty > baseQty + 0.00005) {
-              autopilotPendingBuySymbolsRef.current.delete(sym);
-              delete autopilotPendingBuyMetaRef.current[sym];
-            }
-          }
-          setLastAutopilotOrderOutcome((prev) => {
-            if (!prev || prev.status !== "PENDING") return prev;
-            const sym = String(prev.symbol || "").toUpperCase();
-            const meta = autopilotPendingBuyMetaRef.current[sym];
-            const currentQty = refreshedQtyBySymbol[sym] || 0;
-            const baseQty = meta?.baseQty ?? 0;
-            if (!(currentQty > baseQty + 0.00005)) return prev;
-            return {
-              ...prev,
-              status: "FILLED",
-              code: "FILLED",
-              executedQty: Number.isFinite(meta?.submittedQty) ? (meta?.submittedQty || prev.requestedQty) : prev.requestedQty,
-              message: "Broker fill confirmed on refresh."
-            };
-          });
-        }
-        addLog("ANGELONE", "SYNC", "Indian market portfolio successfully synced.", "SUCCESS");
-      } else {
-        const payload: any = { isPaper };
-        if (apiKey && apiSecret) {
-          payload.apiKey = apiKey;
-          payload.apiSecret = apiSecret;
-        }
-        const response = await fetch("/api/alpaca", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-
-        const resText = await response.text();
-        let rawData: any = null;
-        try {
-          rawData = JSON.parse(resText);
-        } catch (e) {
-          throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
-        }
-
-        if (!response.ok || rawData?.error) {
-          throw new Error(rawData?.error || `Unable to sync positions.`);
-        }
-
-        setAlpacaAccount(rawData.account);
-        const mergedPositions = await mergeBinanceSpotIntoPositions(rawData.positions || []);
-        setAlpacaPositions(mergedPositions);
-        {
-          const refreshedQtyBySymbol: Record<string, number> = {};
-          for (const p of (mergedPositions || [])) {
-            const sym = String(p?.symbol || "").toUpperCase();
-            if (!sym) continue;
-            refreshedQtyBySymbol[sym] = Number(p?.qty || 0);
-          }
-          const pendingSymbols = Array.from(autopilotPendingBuySymbolsRef.current);
-          for (const sym of pendingSymbols) {
-            const meta = autopilotPendingBuyMetaRef.current[sym];
-            const currentQty = refreshedQtyBySymbol[sym] || 0;
-            const baseQty = meta?.baseQty ?? 0;
-            if (currentQty > baseQty + 0.00005) {
-              autopilotPendingBuySymbolsRef.current.delete(sym);
-              delete autopilotPendingBuyMetaRef.current[sym];
-            }
-          }
-          setLastAutopilotOrderOutcome((prev) => {
-            if (!prev || prev.status !== "PENDING") return prev;
-            const sym = String(prev.symbol || "").toUpperCase();
-            const meta = autopilotPendingBuyMetaRef.current[sym];
-            const currentQty = refreshedQtyBySymbol[sym] || 0;
-            const baseQty = meta?.baseQty ?? 0;
-            if (!(currentQty > baseQty + 0.00005)) return prev;
-            return {
-              ...prev,
-              status: "FILLED",
-              code: "FILLED",
-              executedQty: Number.isFinite(meta?.submittedQty) ? (meta?.submittedQty || prev.requestedQty) : prev.requestedQty,
-              message: "Broker fill confirmed on refresh."
-            };
-          });
-        }
-        addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
+      const payload: any = { isPaper };
+      if (apiKey && apiSecret) {
+        payload.apiKey = apiKey;
+        payload.apiSecret = apiSecret;
       }
+      const response = await fetch("/api/alpaca", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const resText = await response.text();
+      let rawData: any = null;
+      try {
+        rawData = JSON.parse(resText);
+      } catch (e) {
+        throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+      }
+
+      if (!response.ok || rawData?.error) {
+        throw new Error(rawData?.error || `Unable to sync positions.`);
+      }
+
+      setAlpacaAccount(rawData.account);
+      const mergedPositions = await mergeBinanceSpotIntoPositions(rawData.positions || []);
+      setAlpacaPositions(mergedPositions);
+      {
+        const refreshedQtyBySymbol: Record<string, number> = {};
+        for (const p of (mergedPositions || [])) {
+          const sym = String(p?.symbol || "").toUpperCase();
+          if (!sym) continue;
+          refreshedQtyBySymbol[sym] = Number(p?.qty || 0);
+        }
+        const pendingSymbols = Array.from(autopilotPendingBuySymbolsRef.current);
+        for (const sym of pendingSymbols) {
+          const meta = autopilotPendingBuyMetaRef.current[sym];
+          const currentQty = refreshedQtyBySymbol[sym] || 0;
+          const baseQty = meta?.baseQty ?? 0;
+          if (currentQty > baseQty + 0.00005) {
+            autopilotPendingBuySymbolsRef.current.delete(sym);
+            delete autopilotPendingBuyMetaRef.current[sym];
+          }
+        }
+        setLastAutopilotOrderOutcome((prev) => {
+          if (!prev || prev.status !== "PENDING") return prev;
+          const sym = String(prev.symbol || "").toUpperCase();
+          const meta = autopilotPendingBuyMetaRef.current[sym];
+          const currentQty = refreshedQtyBySymbol[sym] || 0;
+          const baseQty = meta?.baseQty ?? 0;
+          if (!(currentQty > baseQty + 0.00005)) return prev;
+          return {
+            ...prev,
+            status: "FILLED",
+            code: "FILLED",
+            executedQty: Number.isFinite(meta?.submittedQty) ? (meta?.submittedQty || prev.requestedQty) : prev.requestedQty,
+            message: "Broker fill confirmed on refresh."
+          };
+        });
+      }
+      addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
     } catch (err: any) {
       console.error(err);
       addLog(brokerType, "SYNC_ERROR", `Data stream refresh interrupted: ${err.message || err}`, "WARNING");
     } finally {
       setIsRefreshing(false);
     }
-  }, [useAlpacaLive, brokerType, angelApiKey, angelClientCode, angelMpin, angelTotpSeed, apiKey, apiSecret, isPaper, angelUseServerCreds, addLog, mergeBinanceSpotIntoPositions]);
+  }, [useAlpacaLive, brokerType, apiKey, apiSecret, isPaper, addLog, mergeBinanceSpotIntoPositions]);
 
   // Stable state ref to bypass interval recreate throttling
   const stateRef = React.useRef<any>({
@@ -1257,10 +1208,6 @@ export default function MarketTerminal() {
     apiKey,
     apiSecret,
     brokerType,
-    angelApiKey,
-    angelClientCode,
-    angelMpin,
-    angelTotpSeed,
     autopilotStrategy,
     autopilotTargetTicker,
     autopilotScanBroadUniverse,
@@ -1292,10 +1239,6 @@ export default function MarketTerminal() {
       apiKey,
       apiSecret,
       brokerType,
-      angelApiKey,
-      angelClientCode,
-      angelMpin,
-      angelTotpSeed,
       autopilotStrategy,
       autopilotTargetTicker,
       autopilotScanBroadUniverse,
@@ -1328,10 +1271,6 @@ export default function MarketTerminal() {
     apiKey,
     apiSecret,
     brokerType,
-    angelApiKey,
-    angelClientCode,
-    angelMpin,
-    angelTotpSeed,
     autopilotStrategy,
     autopilotTargetTicker,
     autopilotScanBroadUniverse,
@@ -1388,9 +1327,7 @@ export default function MarketTerminal() {
 
     // Market-block / crypto-only enforcement
     try {
-      const curBlocked = curRef.blockedMarkets || { wallStreet: false, india: false };
-      const isIndia = symbolClean.endsWith('.NS') || symbolClean.endsWith('.BO') || curRef.brokerType === 'ANGELONE';
-      const isWallStreet = !isIndia;
+      const curBlocked = curRef.blockedMarkets || { wallStreet: false };
 
       // Hard guard: when Wall Street session is closed, block non-crypto autopilot orders.
       const marketSessionNow = getMarketSessionET();
@@ -1407,15 +1344,9 @@ export default function MarketTerminal() {
         };
       }
 
-      if (side === 'BUY') {
-        if (curBlocked.india && isIndia) {
-          addAutopilotLog(`Blocked BUY ${symbolClean}: India market trading is disabled.`, 'warn');
-          return { status: 'BLOCKED', code: 'BLOCKED_MARKET_CLOSED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'India market trading disabled.' };
-        }
-        if (curBlocked.wallStreet && isWallStreet) {
-          addAutopilotLog(`Blocked BUY ${symbolClean}: Wall Street trading is disabled.`, 'warn');
-          return { status: 'BLOCKED', code: 'BLOCKED_MARKET_CLOSED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Wall Street trading disabled.' };
-        }
+      if (side === 'BUY' && curBlocked.wallStreet) {
+        addAutopilotLog(`Blocked BUY ${symbolClean}: Wall Street trading is disabled.`, 'warn');
+        return { status: 'BLOCKED', code: 'BLOCKED_MARKET_CLOSED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Wall Street trading disabled.' };
       }
     } catch (e) { /* ignore */ }
 
@@ -1689,84 +1620,7 @@ export default function MarketTerminal() {
         liveEstimatedPrice = matchedLiveTicker.current_price;
       }
 
-      if (curRef.brokerType === "ANGELONE") {
-        if (side === "BUY") {
-          let estPrice = 2475.0;
-          const matchedTicker = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
-          if (matchedTicker) {
-            estPrice = matchedTicker.current_price;
-          } else {
-            if (symbolClean === "RELIANCE") estPrice = 2475.50;
-            else if (symbolClean === "TCS") estPrice = 3820.00;
-            else if (symbolClean === "INFY") estPrice = 1515.00;
-            else if (symbolClean === "TATAMOTORS") estPrice = 962.40;
-            else if (symbolClean === "SBIN") estPrice = 820.00;
-            else if (symbolClean === "HDFCBANK") estPrice = 1600.00;
-          }
-
-          const estimatedCost = estPrice * qtyNum;
-          const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-          const maxAllowedPower = cashValue;
-          const maxSafeOrderVal = maxAllowedPower * 0.90; // Enforce safe margin buffer
-
-          if (estimatedCost > maxSafeOrderVal) {
-            const maxAffordableQty = maxSafeOrderVal / estPrice;
-            if (maxAffordableQty >= 0.1) {
-              finalQty = parseFloat(maxAffordableQty.toFixed(1));
-              addAutopilotLog(`Leverage Control [SmartAPI]: Rescaling automated BUY of ${symbolClean} from ${qtyNum} to affordable ${finalQty} shares due to cash limit.`, "info");
-            } else {
-              addAutopilotLog(`Blocked Live automated BUY: Insufficient Cash buffer. Required: ${estimatedCost.toFixed(2)}, available: ${maxAllowedPower.toFixed(2)}.`, "warn");
-              return {
-                status: "BLOCKED",
-                code: "BLOCKED_CASH_BUFFER",
-                symbol: symbolClean,
-                side,
-                requestedQty: qtyNum,
-                executedQty: 0,
-                message: `Insufficient cash buffer. Required ${estimatedCost.toFixed(2)}, available ${maxAllowedPower.toFixed(2)}.`
-              };
-            }
-          }
-        } else {
-          const existingPos = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
-          const ownedQty = existingPos ? existingPos.qty : 0;
-          if (ownedQty <= 0) {
-            // Allow live shorting only if the user explicitly enabled it and account shows buying power.
-            if (!curRef.allowLiveShorts) {
-              addAutopilotLog(`Blocked automated live SmartAPI SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Angel One short-selling is restricted.`, "warn");
-              return {
-                status: "BLOCKED",
-                code: "BLOCKED_SHORT_RESTRICTED",
-                symbol: symbolClean,
-                side,
-                requestedQty: qtyNum,
-                executedQty: 0,
-                message: "Short-selling is restricted for this live account." 
-              };
-            }
-
-            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
-            if (!Number.isFinite(rawBuyingPower) || rawBuyingPower <= 0) {
-              addAutopilotLog(`Blocked live short of ${symbolClean}: account buying power looks insufficient to support margin shorting.`, "warn");
-              return {
-                status: "BLOCKED",
-                code: "BLOCKED_BUYING_POWER",
-                symbol: symbolClean,
-                side,
-                requestedQty: qtyNum,
-                executedQty: 0,
-                message: "Account buying power insufficient for live shorting."
-              };
-            }
-
-            addAutopilotLog(`Live shorting allowed by config: attempting short ${qtyNum} ${symbolClean}.`, "info");
-          }
-          if (ownedQty > 0 && finalQty > ownedQty) {
-            addAutopilotLog(`Leverage Control: Capping automated live SmartAPI SELL from ${qtyNum} to owned size ${ownedQty}.`, "info");
-            finalQty = ownedQty;
-          }
-        }
-      } else {
+       else {
         if (side === "BUY") {
           const estPrice = liveEstimatedPrice;
 
@@ -1955,24 +1809,6 @@ export default function MarketTerminal() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: cryptoQtyToSend, isLive: true, openShort: side === "SELL", preferredUsdt, preferredSource }),
-          });
-        } else if (curRef.brokerType === "ANGELONE") {
-          // For AngelOne, use paper/sandbox mode automatically when `isPaper` is set.
-          const isMockConn = !!curRef.isPaper || !curRef.angelApiKey || !curRef.angelClientCode;
-          response = await fetch("/api/angelone/trade", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              angelApiKey: curRef.angelApiKey,
-              angelClientCode: curRef.angelClientCode,
-              angelMpin: curRef.angelMpin,
-              angelTotpSeed: curRef.angelTotpSeed,
-              symbol: symbolClean,
-              qty: finalQty,
-              side: side.toLowerCase(),
-              isMockConnection: isMockConn,
-              useServerCreds: curRef.angelUseServerCreds
-            }),
           });
         } else {
           response = await fetch("/api/alpaca/trade", {
@@ -2225,7 +2061,7 @@ export default function MarketTerminal() {
       }
 
       const orderCost = estPrice * qtyNum;
-      const isINR = curRef.brokerType === "ANGELONE";
+      const isINR = false;
       const currencySymbol = isINR ? "₹" : "$";
       
       // Real-world fee/charge calculation based on asset class and broker type
@@ -3010,7 +2846,7 @@ export default function MarketTerminal() {
             side
           };
 
-          const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
+          const curPrefix = false ? "₹" : "$";
           addAutopilotLog(`📐 Touch & Turn Strategy initialised for ${targetSymbol}. ATR(14): ${curPrefix}${atr14.toFixed(2)} (25% threshold: ${curPrefix}${atrThreshold.toFixed(2)}). Opening 15m candle high: ${openHigh}, low: ${openLow} (range: ${rangeRange} - Qualified!).`, "info");
           addAutopilotLog(`🎯 Placed ${side} LIMIT order at range edge: ${curPrefix}${limitPrice.toFixed(2)}. Target profit (38.2% Fib): ${curPrefix}${targetPrice.toFixed(2)}. Stop boundary (2:1 RR): ${curPrefix}${stopPrice.toFixed(2)}. Monitoring first 90 minutes.`, "success");
           
@@ -3031,7 +2867,7 @@ export default function MarketTerminal() {
             else if (targetSymbol === "MSFT") currentSpotPrice = 425.00;
           }
 
-          const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
+          const curPrefix = false ? "₹" : "$";
 
           if (tState.status === "WAITING_LIMIT") {
             addAutopilotLog(`⏳ Waiting for ${targetSymbol} to touch limit at ${curPrefix}${tState.limitPrice.toFixed(2)}. Current price: ${curPrefix}${currentSpotPrice.toFixed(2)}. Strategy duration: 15 / 90 minutes.`, "info");
@@ -3144,7 +2980,7 @@ export default function MarketTerminal() {
           else if (targetSymbol === "MSFT") currentSpotPrice = 425.00;
         }
 
-        const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
+        const curPrefix = false ? "₹" : "$";
         let mState = (curRef.macdStateMap || {})[targetSymbol] || curRef.macdState || null;
 
         if (!mState || mState.symbol !== targetSymbol) {
@@ -3354,7 +3190,7 @@ export default function MarketTerminal() {
           else if (targetSymbol === "MSFT") currentSpotPrice = 425.00;
         }
 
-        const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
+        const curPrefix = false ? "₹" : "$";
         let sState = (curRef.sneakyPivotStateMap || {})[targetSymbol] || curRef.sneakyPivotState || null;
 
         if (!sState || sState.symbol !== targetSymbol) {
@@ -3847,10 +3683,6 @@ export default function MarketTerminal() {
 
   // Setup persistence on Mount
   useEffect(() => {
-    const savedBrokerType = (localStorage.getItem("RISK_SENTRY_BROKER_TYPE") || "ALPACA") as "ALPACA" | "ANGELONE";
-    const savedUseAlpaca = localStorage.getItem("APCA_USE_ALPACA") === "true";
-
-    // Restore Alpaca keys
     const savedApiKey = localStorage.getItem("APCA_API_KEY") || "";
     const savedApiSecret = localStorage.getItem("APCA_API_SECRET") || "";
     const rawSavedIsPaper = localStorage.getItem("APCA_IS_PAPER");
@@ -3858,23 +3690,7 @@ export default function MarketTerminal() {
 
     if (savedApiKey) setApiKey(savedApiKey);
     if (savedApiSecret) setApiSecret(savedApiSecret);
-    // If user explicitly set a preference, restore it now. Otherwise we'll auto-detect below.
     if (savedIsPaper !== null) setIsPaper(savedIsPaper);
-
-    // Restore Angel One keys
-    const savedAngelApiKey = localStorage.getItem("ANGEL_API_KEY") || "";
-    const savedAngelClientCode = localStorage.getItem("ANGEL_CLIENT_CODE") || "";
-    const savedAngelMpin = localStorage.getItem("ANGEL_MPIN") || "";
-    const savedAngelTotpSeed = localStorage.getItem("ANGEL_TOTP_SEED") || "";
-    const savedAngelUseServerCreds = localStorage.getItem("ANGEL_USE_SERVER_CREDS") === "true";
-
-    if (savedAngelApiKey) setAngelApiKey(savedAngelApiKey);
-    if (savedAngelClientCode) setAngelClientCode(savedAngelClientCode);
-    if (savedAngelMpin) setAngelMpin(savedAngelMpin);
-    if (savedAngelTotpSeed) setAngelTotpSeed(savedAngelTotpSeed);
-    setAngelUseServerCreds(!!savedAngelUseServerCreds);
-
-    setBrokerType(savedBrokerType);
 
     const ts = new Date().toLocaleTimeString();
 
@@ -3901,237 +3717,25 @@ export default function MarketTerminal() {
         }
       }
 
-      if (savedUseAlpaca && savedBrokerType === "ANGELONE" && savedAngelApiKey && savedAngelClientCode && savedAngelMpin) {
-        setLogs([
-          {
-            id: `boot-${Date.now()}-1`,
-            timestamp: ts,
-            symbol: "SYSTEM",
-            action: "BOOT",
-            message: "Interactive Margin Risk analyzer system active.",
-            status: "INFO"
-          },
-          {
-            id: `boot-${Date.now()}-2`,
-            timestamp: ts,
-            symbol: "ANGELONE",
-            action: "AUTO_CONNECT",
-            message: `Auto-connecting using stored credentials to AngelOne SmartAPI...`,
-            status: "INFO"
-          }
-        ]);
-
-        setIsConnecting(true);
-        try {
-          const response = await fetch("/api/angelone", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              angelApiKey: savedAngelApiKey,
-              angelClientCode: savedAngelClientCode,
-              angelMpin: savedAngelMpin,
-              angelTotpSeed: savedAngelTotpSeed,
-              isMockConnection: false,
-              useServerCreds: savedAngelUseServerCreds
-            }),
-          });
-
-          const resText = await response.text();
-          let rawData: any = null;
-          try {
-            rawData = JSON.parse(resText);
-          } catch (e) {
-            throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
-          }
-
-          if (!response.ok || rawData?.error) {
-            throw new Error(rawData?.error || "Failed stored key validation.");
-          }
-          setAlpacaAccount(rawData.account);
-          setAlpacaPositions(await mergeBinanceSpotIntoPositions(rawData.positions || []));
-          setIsConnected(true);
-          setUseAlpacaLive(true);
-
-          setLogs((prev) => [
-            {
-              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              timestamp: new Date().toLocaleTimeString(),
-              symbol: "ANGELONE",
-              action: "CONNECT_SUCCESS",
-              message: `Securely auto-connected! Client Code: ${rawData.account.account_number}. Cash: ₹${parseFloat(rawData.account.cash).toLocaleString()}`,
-              status: "SUCCESS"
-            },
-            ...prev
-          ]);
-        } catch (err: any) {
-          console.error("Auto-connect to AngelOne failed:", err);
-          setIsConnected(false);
-          setUseAlpacaLive(false);
-          setLogs((prev) => [
-            {
-              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              timestamp: new Date().toLocaleTimeString(),
-              symbol: "ANGELONE",
-              action: "AUTO_CONNECT_FAIL",
-              message: `Auto-connect failed: ${err.message || "SmartAPI auth failure"}. Falling back to Local Indian Stock Simulator.`,
-              status: "WARNING"
-            },
-            ...prev
-          ]);
-        } finally {
-          setIsConnecting(false);
+      setLogs([
+        {
+          id: `boot-${Date.now()}-1`,
+          timestamp: ts,
+          symbol: "SYSTEM",
+          action: "BOOT",
+          message: "Interactive Margin Risk analyzer system active.",
+          status: "INFO"
+        },
+        {
+          id: `boot-${Date.now()}-2`,
+          timestamp: ts,
+          symbol: "ALPACA",
+          action: "LOCAL_INIT",
+          message: "Dashboard initialized in Local US Stock Simulator mode.",
+          status: "INFO"
         }
-      } else if (savedUseAlpaca && savedBrokerType === "ALPACA") {
-        const hasSavedClientKeys = !!savedApiKey && !!savedApiSecret;
-        setLogs([
-          {
-            id: `boot-${Date.now()}-1`,
-            timestamp: ts,
-            symbol: "SYSTEM",
-            action: "BOOT",
-            message: "Interactive Margin Risk analyzer system active.",
-            status: "INFO"
-          },
-          {
-            id: `boot-${Date.now()}-2`,
-            timestamp: ts,
-            symbol: "ALPACA",
-            action: "AUTO_CONNECT",
-            message: `Auto-connecting using ${hasSavedClientKeys ? "stored keys" : "server-side credentials"} to Alpaca ${effectiveIsPaper ? "Paper" : "Live"}...`,
-            status: "INFO"
-          }
-        ]);
+      ]);
 
-        setIsConnecting(true);
-        try {
-          const payload: any = { isPaper: effectiveIsPaper };
-          if (savedApiKey && savedApiSecret) {
-            payload.apiKey = savedApiKey;
-            payload.apiSecret = savedApiSecret;
-          }
-          const response = await fetch("/api/alpaca", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-
-          const resText = await response.text();
-          let rawData: any = null;
-          try {
-            rawData = JSON.parse(resText);
-          } catch (e) {
-            throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
-          }
-
-          if (!response.ok || rawData?.error) {
-            throw new Error(rawData?.error || "Failed stored key validation.");
-          }
-          setAlpacaAccount(rawData.account);
-          setAlpacaPositions(rawData.positions);
-          setIsConnected(true);
-          setUseAlpacaLive(true);
-
-          setLogs((prev) => [
-            {
-              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              timestamp: new Date().toLocaleTimeString(),
-              symbol: "ALPACA",
-              action: "CONNECT_SUCCESS",
-              message: `Securely auto-connected! Account: ${rawData.account.account_number}. Cash: ${parseFloat(rawData.account.cash).toLocaleString()}`,
-              status: "SUCCESS"
-            },
-            ...prev
-          ]);
-        } catch (err: any) {
-          console.error("Auto-connect failed:", err);
-          setIsConnected(false);
-          setUseAlpacaLive(false);
-          setLogs((prev) => [
-            {
-              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              timestamp: new Date().toLocaleTimeString(),
-              symbol: "ALPACA",
-              action: "AUTO_CONNECT_FAIL",
-              message: `Auto-connect failed: ${err.message || "Broker credentials mismatch"}. Falling back to Simulator.`,
-              status: "WARNING"
-            },
-            ...prev
-          ]);
-        } finally {
-          setIsConnecting(false);
-        }
-      } else {
-        setUseAlpacaLive(false);
-        // Ensure default simulation asset coordinates are structured according to user region preference
-        if (savedBrokerType === "ANGELONE") {
-          setMockPositions([
-            {
-              symbol: "RELIANCE",
-              qty: 10.0,
-              avg_entry_price: 2450.0,
-              current_price: 2475.5,
-              market_value: 24755.0,
-              unrealized_pl: 255.0,
-              unrealized_plpc: 0.0104,
-              maintenance_margin_rate: 0.20,
-            },
-            {
-              symbol: "TCS",
-              qty: 5.0,
-              avg_entry_price: 3850.0,
-              current_price: 3820.0,
-              market_value: 19100.0,
-              unrealized_pl: -150.0,
-              unrealized_plpc: -0.0078,
-              maintenance_margin_rate: 0.20,
-            },
-            {
-              symbol: "INFY",
-              qty: 15.0,
-              avg_entry_price: 1480.0,
-              current_price: 1515.0,
-              market_value: 22725.0,
-              unrealized_pl: 525.0,
-              unrealized_plpc: 0.0236,
-              maintenance_margin_rate: 0.20,
-            },
-            {
-              symbol: "TATAMOTORS",
-              qty: 20.0,
-              avg_entry_price: 950.0,
-              current_price: 962.4,
-              market_value: 19248.0,
-              unrealized_pl: 248.0,
-              unrealized_plpc: 0.0131,
-              maintenance_margin_rate: 0.25,
-            }
-          ]);
-          setSimCash(100000);
-          setStartingCapital(185828); // Cash + long assets
-          setOrderSymbol("RELIANCE");
-          setAutopilotTargetTicker("RELIANCE");
-        }
-        setLogs([
-          {
-            id: `boot-${Date.now()}-1`,
-            timestamp: ts,
-            symbol: "SYSTEM",
-            action: "BOOT",
-            message: "Interactive Margin Risk analyzer system active.",
-            status: "INFO"
-          },
-          {
-            id: `boot-${Date.now()}-2`,
-            timestamp: ts,
-            symbol: "SYSTEM",
-            action: "INITIALIZE",
-            message: `Dashboard initialized in Local ${savedBrokerType === "ANGELONE" ? "Indian Stock" : "US Stock"} Simulator mode.`,
-            status: "INFO"
-          }
-        ]);
-      }
-
-      // Auto-detect: if the user didn't explicitly choose Paper/Live, prefer Live when only LIVE keys exist on server.
       try {
         if (rawSavedIsPaper === null) {
           const resp = await fetch("/api/alpaca/inspect");
@@ -4153,7 +3757,7 @@ export default function MarketTerminal() {
     };
 
     initApp();
-  }, [addLog, mergeBinanceSpotIntoPositions]);
+  }, [addLog]);
 
   // (moved) addLog hoisted earlier
 
@@ -4243,75 +3847,22 @@ export default function MarketTerminal() {
   // Test live connection without persisting or switching modes
   const handleTestLogin = async () => {
     try {
-      if (brokerType !== "ANGELONE") {
-        showToast("Test Login is only for AngelOne broker.", "WARNING");
+      if (!apiKey || !apiSecret) {
+        showToast("Alpaca API Key/Secret missing — enter keys to test.", "CRITICAL");
         return;
       }
-      showToast("Testing AngelOne server auth...", "INFO");
-      const body: any = angelUseServerCreds
-        ? { useServerCreds: true }
-        : { useServerCreds: false, angelApiKey, angelClientCode, angelMpin, angelTotpSeed };
-
-      const res = await fetch("/api/angelone/auth", {
+      showToast("Testing Alpaca connection...", "INFO");
+      const res = await fetch("/api/alpaca", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ apiKey, apiSecret, isPaper }),
       });
-      const json = await res.json();
-      if (!res.ok || json?.error) {
-        showToast(`Auth Failed: ${json?.error || json?.msg || "Unknown error"}`, "CRITICAL");
-        addLog("ANGELONE", "AUTH_TEST", `Auth failed: ${json?.error || json?.msg || 'unknown'}`, "CRITICAL");
+      const text = await res.text();
+      const raw = JSON.parse(text);
+      if (!res.ok || raw?.error) {
+        showToast(`Alpaca Test Failed: ${raw?.error || "Unable to authenticate"}`, "CRITICAL");
       } else {
-        showToast(`Auth OK: ${json?.msg || "server_auth_success"}` , "SUCCESS");
-        addLog("ANGELONE", "AUTH_TEST", `Auth succeeded: ${json?.msg || 'ok'}`, "SUCCESS");
-      }
-    } catch (err: any) {
-      console.error("Auth test error:", err);
-      showToast(`Auth Error: ${err?.message || err}`, "CRITICAL");
-      addLog("ANGELONE", "AUTH_TEST", `Auth error: ${err?.message || err}`, "CRITICAL");
-    }
-  };
-
-  const handleTestConnection = async () => {
-    try {
-      if (brokerType === "ANGELONE") {
-        if (!angelApiKey || !angelClientCode || !angelMpin) {
-          showToast("AngelOne keys missing — enter credentials to test.", "CRITICAL");
-          return;
-        }
-        showToast("Testing AngelOne connection...", "INFO");
-        const res = await fetch("/api/angelone", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ angelApiKey, angelClientCode, angelMpin, angelTotpSeed, isMockConnection: false, useServerCreds: angelUseServerCreds }),
-        });
-        // note: pass server-creds flag if user enabled it
-        const text = await res.text();
-        const raw = JSON.parse(text);
-        if (!res.ok || raw?.error) {
-          showToast(`AngelOne Test Failed: ${raw?.error || "Unknown error"}`, "CRITICAL");
-        } else {
-          showToast(`AngelOne OK — Cash: ₹${parseFloat(raw.account.cash).toLocaleString()}`, "SUCCESS");
-        }
-      } else {
-        // Alpaca
-        if (!apiKey || !apiSecret) {
-          showToast("Alpaca API Key/Secret missing — enter keys to test.", "CRITICAL");
-          return;
-        }
-        showToast("Testing Alpaca connection...", "INFO");
-        const res = await fetch("/api/alpaca", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ apiKey, apiSecret, isPaper }),
-        });
-        const text = await res.text();
-        const raw = JSON.parse(text);
-        if (!res.ok || raw?.error) {
-          showToast(`Alpaca Test Failed: ${raw?.error || "Unable to authenticate"}`, "CRITICAL");
-        } else {
-          showToast(`Alpaca OK — Cash: $${parseFloat(raw.account.cash).toLocaleString()}`, "SUCCESS");
-        }
+        showToast(`Alpaca OK — Cash: $${parseFloat(raw.account.cash).toLocaleString()}`, "SUCCESS");
       }
     } catch (err: any) {
       console.error("Test connection error:", err);
@@ -4572,216 +4123,7 @@ export default function MarketTerminal() {
         return;
       }
 
-      if (brokerType === "ANGELONE") {
-        // Route crypto symbols to Binance (live) instead of Alpaca when appropriate
-        const isCrypto = isCryptoSymbol(symbolClean);
-        if (isCrypto) {
-          const normSymbol = normalizeSymbol(symbolClean);
-          // Shorting gating: opening a short (selling without owning) requires explicit allowLiveShorts
-          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
-          const ownedQty = existingPos ? existingPos.qty : 0;
-          const attemptingOpenShort = side === "SELL" && (ownedQty <= 0 || qtyNum > ownedQty);
-          if (attemptingOpenShort && !allowLiveShorts) {
-            setIsPlacingOrder(false);
-            setOrderError(`Live short-selling for crypto is blocked by local policy. Enable 'Allow Live Shorts' to proceed or use the simulator.`);
-            addLog(symbolClean, "SELL_BLOCKED_SHORTS", "Blocked live crypto short attempt — enable Allow Live Shorts to override.", "WARNING");
-            return;
-          }
-
-          addLog("BROKER", side, `Transmitting ${side} ${qtyNum} ${symbolClean} via live broker.`, "INFO");
-          try {
-            // buying-power check for manual crypto orders (Binance) — prefer futures USDT via server
-            const estPrice = alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
-            const rawCashValue = parseFloat(alpacaAccount?.cash || "0");
-            const rawBuyingPowerValue = parseFloat(alpacaAccount?.buying_power || "0");
-            const maxCryptoBuyUsd = Math.max(
-              100,
-              Math.min(rawBuyingPowerValue > 0 ? rawBuyingPowerValue : rawCashValue, rawCashValue) * 0.15
-            );
-            let qtyToSend = parseFloat(qtyNum.toFixed(6));
-            if (side === "BUY" && (qtyToSend * estPrice) > maxCryptoBuyUsd) {
-              qtyToSend = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
-              addLog(normSymbol, "BUY_RESIZED", `Manual crypto BUY capped to ~$${maxCryptoBuyUsd.toFixed(2)} by policy.`, "INFO");
-            }
-            const intendedCost = estPrice * qtyToSend;
-            let maxSafeOrderVal = 0;
-            let preferredUsdt = 0;
-            let preferredSource: "futures" | "spot" | "none" = "none";
-            const pref = await fetchBinanceFundingSnapshot();
-            const prefUsdt = pref.usdt;
-            const prefSource = pref.source === "futures" ? "futures" : "none";
-            preferredUsdt = prefSource === "futures" ? prefUsdt : 0;
-            preferredSource = prefSource;
-            if (prefSource !== "futures") {
-              addAutopilotLog(`Blocked ${symbolClean}: Binance futures USDT funding required. Current source = ${pref.source}.`, "warn");
-              return {
-                status: "BLOCKED",
-                code: "BLOCKED_INSUFFICIENT_USDT",
-                symbol: symbolClean,
-                side,
-                requestedQty: qtyNum,
-                executedQty: 0,
-                message: `Binance futures USDT funding required. Current source = ${pref.source}.`,
-              } as any;
-            }
-            if (prefUsdt > 0) {
-              maxSafeOrderVal = prefUsdt * 0.9;
-            }
-            if (maxSafeOrderVal <= 0) {
-              const cashValue = parseFloat(alpacaAccount?.cash || "0");
-              const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
-              const isFractional = qtyNum % 1 !== 0;
-              const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-              maxSafeOrderVal = maxAllowedPower * 0.7;
-            }
-            if (intendedCost > maxSafeOrderVal) {
-              setIsPlacingOrder(false);
-              setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
-              addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`, "WARNING");
-              return;
-            }
-
-            const payload: any = {
-              symbol: normSymbol,
-              side: side,
-              type: "MARKET",
-              quantity: qtyToSend,
-              isLive: true,
-              openShort: attemptingOpenShort && allowLiveShorts,
-              preferredUsdt,
-              preferredSource,
-            };
-
-            const response = await fetch("/api/binance/trade", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            });
-
-            const resText = await response.text();
-            let dataOrder: any = null;
-            try {
-              dataOrder = JSON.parse(resText);
-            } catch (e) {
-              throw new Error(`Server returned error output: ${resText.slice(0, 120).trim()}...`);
-            }
-
-            if (!response.ok || dataOrder?.error) {
-              throw new Error(dataOrder?.error || "Order rejected by Gemini proxy server.");
-            }
-
-            setOrderSuccess(`Binance order accepted: ${dataOrder.order?.clientOrderId || dataOrder.order?.orderId || 'submitted'}`);
-            addLog(symbolClean, `${side}_FILLED`, `Binance crypto order executed for ${qtyNum} ${symbolClean}.`, "SUCCESS");
-
-            const newOrderObj: Order = {
-              id: dataOrder.order?.clientOrderId || dataOrder.order?.orderId || `bin-${Date.now()}`,
-              symbol: symbolClean,
-              side: side,
-              qty: qtyNum,
-              price: dataOrder.order?.price || dataOrder.order?.avgPrice || estPrice,
-              status: dataOrder.order?.status?.toUpperCase() || "ACCEPTED",
-              submittedAt: new Date().toLocaleTimeString(),
-            };
-            setOrders((prev) => [newOrderObj, ...prev]);
-            setTimeout(() => handleRefreshData(), 1200);
-          } catch (err: any) {
-            console.error(err);
-            setOrderError(err.message || "Failed Binance order.");
-            addLog(symbolClean, `${side}_REJECTED`, err.message || "Binance execution failed.", "CRITICAL");
-          } finally {
-            setIsPlacingOrder(false);
-          }
-
-          return;
-        }
-
-        if (side === "SELL") {
-          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
-          const ownedQty = existingPos ? existingPos.qty : 0;
-          if (ownedQty <= 0) {
-            setIsPlacingOrder(false);
-            setOrderError(`AngelOne SmartAPI: You do not own a long position in ${symbolClean} on NSE to sell.`);
-            addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on SmartAPI.`, "WARNING");
-            return;
-          }
-          if (qtyNum > ownedQty) {
-            setIsPlacingOrder(false);
-            setOrderError(`AngelOne SmartAPI: You only own ${ownedQty} shares of ${symbolClean}. You cannot sell ${qtyNum} shares.`);
-            addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on SmartAPI. Tried to sell ${qtyNum} vs owned ${ownedQty}.`, "WARNING");
-            return;
-          }
-        } else if (side === "BUY") {
-          const cashValue = parseFloat(alpacaAccount?.cash || "0");
-          if (estimatedCost > cashValue) {
-            setIsPlacingOrder(false);
-            setOrderError(`AngelOne SmartAPI: Insufficient INR funds. Estimated cost for order is ₹${estimatedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} but you only have ₹${cashValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} available cash.`);
-            addLog(symbolClean, "BUY_FAILED", `Blocked manual buy on SmartAPI due to insufficient cash balance.`, "WARNING");
-            return;
-          }
-        }
-
-        addLog("ANGELONE", side, `Transmitting Order: ${side} for ${qtyNum} share(s) of ${symbolClean} on NSE`, "INFO");
-        try {
-          const isMockConn = !!isPaper || !angelApiKey || !angelClientCode;
-          const response = await fetch("/api/angelone/trade", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              angelApiKey,
-              angelClientCode,
-              angelMpin,
-              angelTotpSeed,
-              symbol: symbolClean,
-              qty: qtyNum,
-              side: side.toLowerCase(),
-              isMockConnection: isMockConn
-            }),
-          });
-
-          const resText = await response.text();
-          let dataOrder: any = null;
-          try {
-            dataOrder = JSON.parse(resText);
-          } catch (e) {
-            throw new Error(`Server returned error output: ${resText.slice(0, 120).trim()}...`);
-          }
-
-          if (!response.ok || dataOrder?.error) {
-            throw new Error(dataOrder?.error || "Order rejected by SmartAPI server.");
-          }
-
-          setOrderSuccess(`Successfully queued on NSE! Order ID: ${dataOrder.id || "Submitted"}.`);
-          addLog(
-            symbolClean,
-            `${side}_FILLED`,
-            `SmartAPI NSE order executed for ${qtyNum} share(s) of ${symbolClean}.`,
-            "SUCCESS"
-          );
-
-          // Add to historical orders list
-          const newOrderObj: Order = {
-            id: dataOrder.id || `ord-${Date.now()}`,
-            symbol: symbolClean,
-            side: side,
-            qty: qtyNum,
-            price: dataOrder.price || estPrice,
-            status: "FILLED",
-            submittedAt: new Date().toLocaleTimeString(),
-          };
-          setOrders((prev) => [newOrderObj, ...prev]);
-
-          setTimeout(() => {
-            handleRefreshData();
-          }, 1200);
-
-        } catch (err: any) {
-          console.error(err);
-          setOrderError(err.message || "Failed SmartAPI order.");
-          addLog(symbolClean, `${side}_REJECTED`, err.message || "Transaction failed.", "CRITICAL");
-        } finally {
-          setIsPlacingOrder(false);
-        }
-      } else {
+       else {
         if (side === "SELL") {
           const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
           const ownedQty = existingPos ? existingPos.qty : 0;
@@ -4901,7 +4243,7 @@ export default function MarketTerminal() {
       }
 
       const orderCost = estPrice * qtyNum;
-      const isINR = brokerType === "ANGELONE";
+      const isINR = false;
       const currencySymbol = isINR ? "₹" : "$";
 
       // Real broker charges calculations matching real live conditions 
@@ -5200,137 +4542,78 @@ export default function MarketTerminal() {
   const handleLiquidatePosition = async (symbol: string) => {
     const symbolClean = symbol.toUpperCase().trim();
     setIsLiquidating(symbolClean);
-    
+
     try {
       if (useAlpacaLive) {
-        if (brokerType === "ANGELONE") {
-          // AngelOne Liquidation: place manual market SELL order for owned qty
-          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
-          if (!existingPos || existingPos.qty <= 0) {
-            throw new Error(`You have no active holding in ${symbolClean} to liquidate.`);
-          }
-          
-          addLog("ANGELONE", "LIQUIDATE_START", `Initiating close-out for ${symbolClean} (${existingPos.qty} shares)`, "INFO");
-          
-          const response = await fetch("/api/angelone/trade", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              angelApiKey,
-              angelClientCode,
-              angelMpin,
-              angelTotpSeed,
-              symbol: symbolClean,
-              qty: existingPos.qty,
-              side: "sell",
-              isMockConnection: !!isPaper || !angelApiKey || !angelClientCode,
-              useServerCreds: angelUseServerCreds,
-            }),
-          });
-          
-          const resText = await response.text();
-          let dataOrder: any = null;
-          try {
-            dataOrder = JSON.parse(resText);
-          } catch (e) {
-            throw new Error(`Server returned error: ${resText.slice(0, 100)}`);
-          }
-          
-          if (!response.ok || dataOrder?.error) {
-            throw new Error(dataOrder?.error || "Order rejected by broker.");
-          }
-          
-          addLog(symbolClean, "LIQUIDATED", `Position fully liquidated! Sold ${existingPos.qty} shares.`, "SUCCESS");
-          if (isLossMakingPosition(existingPos)) {
-            armLiquidationCooldown(symbolClean, "manual position liquidation");
-          }
-          
-          // Append to manual order records
-          const newOrderObj: Order = {
-            id: dataOrder.id || `ord-${Date.now()}`,
+        // Alpaca direct DELETE position liquidation helper
+        addLog("ALPACA", "LIQUIDATE_START", `Initiating direct close-out for ${symbolClean} via brokerage liquidation`, "INFO");
+
+        const response = await fetch("/api/alpaca/liquidate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            apiKey,
+            apiSecret,
+            isPaper,
             symbol: symbolClean,
-            side: "SELL",
-            qty: existingPos.qty,
-            price: dataOrder.price || existingPos.current_price,
-            status: "FILLED",
-            submittedAt: new Date().toLocaleTimeString(),
-          };
-          setOrders((prev) => [newOrderObj, ...prev]);
-          
-          setTimeout(() => {
-            handleRefreshData();
-          }, 1200);
-        } else {
-          // Alpaca direct DELETE position liquidation helper
-          addLog("ALPACA", "LIQUIDATE_START", `Initiating direct close-out for ${symbolClean} via brokerage liquidation`, "INFO");
-          
-          const response = await fetch("/api/alpaca/liquidate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              apiKey,
-              apiSecret,
-              isPaper,
-              symbol: symbolClean,
-            }),
-          });
+          }),
+        });
 
-          const resText = await response.text();
-          let rawData: any = null;
-          try {
-            rawData = JSON.parse(resText);
-          } catch (e) {
-            throw new Error(`Liquidation endpoint returned non-JSON response: ${resText.slice(0, 120).trim()}...`);
-          }
-          if (!response.ok || rawData?.error) {
-            throw new Error(rawData?.error || "Liquidation rejected by Alpaca.");
-          }
-
-          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
-          
-          addLog(symbolClean, "LIQUIDATED", `Direct position liquidation successful! Broker order queued.`, "SUCCESS");
-          if (isLossMakingPosition(existingPos)) {
-            armLiquidationCooldown(symbolClean, "manual position liquidation");
-          }
-          
-          setTimeout(() => {
-            handleRefreshData();
-          }, 1250);
+        const resText = await response.text();
+        let rawData: any = null;
+        try {
+          rawData = JSON.parse(resText);
+        } catch (e) {
+          throw new Error(`Liquidation endpoint returned non-JSON response: ${resText.slice(0, 120).trim()}...`);
         }
+
+        if (!response.ok || rawData?.error) {
+          throw new Error(rawData?.error || "Liquidation rejected by Alpaca.");
+        }
+
+        const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
+        addLog(symbolClean, "LIQUIDATED", `Direct position liquidation successful! Broker order queued.`, "SUCCESS");
+        if (isLossMakingPosition(existingPos)) {
+          armLiquidationCooldown(symbolClean, "manual position liquidation");
+        }
+
+        setTimeout(() => {
+          handleRefreshData();
+        }, 1250);
       } else {
         // Simulated Portfolio Liquidation Logic
         const pos = mockPositions.find((p) => p.symbol === symbolClean);
         if (!pos) {
           throw new Error(`Holding not found in active simulator workspace.`);
         }
-        
+
         const isLong = pos.qty >= 0;
         const absQty = Math.abs(pos.qty);
         const orderCost = absQty * pos.current_price;
-        
+
         // Fee calculations congruent with the standard order desk
         let flatBrokerage = symbolClean === "BTCUSD" ? 0.10 : 1.00;
         let taxRate = symbolClean === "BTCUSD" ? 0.0015 : 0.0005;
         let slippageRate = 0.0002;
         const orderFees = parseFloat((flatBrokerage + orderCost * (taxRate + slippageRate)).toFixed(2));
         const netProceeds = isLong ? (orderCost - orderFees) : -(orderCost + orderFees);
-        
+
         // Update local state cash & remove position
         setSimCash((c) => c + netProceeds);
         setMockPositions((prev) => prev.filter((p) => p.symbol !== symbolClean));
-        
+
         // Record simulated offline trade
         const newOrderObj: Order = {
           id: `sim-liq-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           symbol: symbolClean,
-          side: isLong ? "SELL" : "BUY", // short positions are covered/bought back
+          side: isLong ? "SELL" : "BUY",
           qty: absQty,
           price: pos.current_price,
           status: "FILLED",
           submittedAt: new Date().toLocaleTimeString(),
         };
         setOrders((prev) => [newOrderObj, ...prev]);
-        
+
         addLog(
           symbolClean,
           "LIQUIDATED_SIM",
@@ -5392,118 +4675,44 @@ export default function MarketTerminal() {
     
     try {
       if (useAlpacaLive) {
-        if (brokerType === "ANGELONE") {
-          // Sequentially close out all positions through SmartAPI
-          if (alpacaPositions.length === 0) {
-            throw new Error("No active positions to liquidate.");
-          }
-          
-          let successCount = 0;
-          let failureCount = 0;
-          for (const pos of alpacaPositions) {
-            if (pos.qty === 0) continue;
-            const isLongPosition = pos.qty > 0;
-            const qtyToClose = Math.abs(pos.qty);
-            const closeSide = isLongPosition ? "sell" : "buy";
-            try {
-              const response = await fetch("/api/angelone/trade", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  angelApiKey,
-                  angelClientCode,
-                  angelMpin,
-                  angelTotpSeed,
-                  symbol: pos.symbol,
-                  qty: qtyToClose,
-                  side: closeSide,
-                  isMockConnection: !angelApiKey || !angelClientCode,
-                  useServerCreds: angelUseServerCreds,
-                }),
-              });
-
-              const resText = await response.text();
-              let data: any = null;
-              try {
-                data = JSON.parse(resText);
-              } catch {
-                data = null;
-              }
-
-              if (!response.ok || data?.error) {
-                failureCount++;
-                const errorMsg = data?.error || `Liquidation failed for ${pos.symbol}.`;
-                addLog(pos.symbol, "LIQUIDATION_FAILED", errorMsg, "CRITICAL");
-                console.error(`Sub-liquidation failed for ${pos.symbol}:`, errorMsg);
-                continue;
-              }
-
-              successCount++;
-              addLog(pos.symbol, "LIQUIDATED", `Position successfully closed: ${qtyToClose} shares ${closeSide.toUpperCase()}.`, "SUCCESS");
-              if (isLossMakingPosition(pos)) {
-                armLiquidationCooldown(pos.symbol, "portfolio liquidation");
-              }
-            } catch (posErr) {
-              failureCount++;
-              console.error(`Sub-liquidation failed for ${pos.symbol}:`, posErr);
-              addLog(pos.symbol, "LIQUIDATION_FAILED", String(posErr.message || posErr), "CRITICAL");
-            }
-          }
-
-          if (successCount === 0 && failureCount > 0) {
-            throw new Error(`Portfolio liquidation failed for ${failureCount} positions.`);
-          }
-
-          addLog(
-            "PORTFOLIO",
-            "LIQUIDATION_COMPLETE",
-            failureCount > 0
-              ? `Completed global liquidation with partial success: closed out ${successCount} holdings, ${failureCount} failed.`
-              : `Completed global liquidation. Closed out ${successCount} NSE holdings.`,
-            failureCount > 0 ? "WARNING" : "SUCCESS"
-          );
-
-          setTimeout(() => {
-            handleRefreshData();
-          }, 1500);
-        } else {
-          // Alpaca direct delete-all-positions route
-          if (alpacaPositions.length === 0) {
-            throw new Error("No active positions to liquidate.");
-          }
-
-          const response = await fetch("/api/alpaca/liquidate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              apiKey,
-              apiSecret,
-              isPaper,
-            }),
-          });
-
-          const resText = await response.text();
-          let rawData: any = null;
-          try {
-            rawData = JSON.parse(resText);
-          } catch (e) {
-            throw new Error(`Liquidation endpoint returned non-JSON response: ${resText.slice(0, 120).trim()}...`);
-          }
-          if (!response.ok || rawData?.error) {
-            throw new Error(rawData?.error || "Portfolio liquidation rejected by Alpaca.");
-          }
-          
-          addLog("PORTFOLIO", "LIQUIDATION_COMPLETE", "Alpaca direct portfolio liquidation broadcasted. All broker assets closed out.", "SUCCESS");
-          for (const pos of alpacaPositions) {
-            if (Math.abs(pos.qty) > 0 && isLossMakingPosition(pos)) {
-              armLiquidationCooldown(pos.symbol, "portfolio liquidation");
-            }
-          }
-          
-          setTimeout(() => {
-            handleRefreshData();
-          }, 1500);
+        // Alpaca direct delete-all-positions route
+        if (alpacaPositions.length === 0) {
+          const message = "No active positions to liquidate.";
+          addLog("PORTFOLIO", "LIQUIDATE_NONE", message, "WARNING");
+          throw new Error(message);
         }
+
+        const response = await fetch("/api/alpaca/liquidate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            apiKey,
+            apiSecret,
+            isPaper,
+          }),
+        });
+
+        const resText = await response.text();
+        let rawData: any = null;
+        try {
+          rawData = JSON.parse(resText);
+        } catch (e) {
+          throw new Error(`Liquidation endpoint returned non-JSON response: ${resText.slice(0, 120).trim()}...`);
+        }
+        if (!response.ok || rawData?.error) {
+          throw new Error(rawData?.error || "Portfolio liquidation rejected by Alpaca.");
+        }
+        
+        addLog("PORTFOLIO", "LIQUIDATION_COMPLETE", "Alpaca direct portfolio liquidation broadcasted. All broker assets closed out.", "SUCCESS");
+        for (const pos of alpacaPositions) {
+          if (Math.abs(pos.qty) > 0 && isLossMakingPosition(pos)) {
+            armLiquidationCooldown(pos.symbol, "portfolio liquidation");
+          }
+        }
+        
+        setTimeout(() => {
+          handleRefreshData();
+        }, 1500);
       } else {
         // Local simulator portfolio liquidation
         if (mockPositions.length === 0) {
@@ -5726,49 +4935,9 @@ if __name__ == "__main__":
           Crypto trading is disabled in this terminal app. Autopilot will not switch into a crypto-only strategy.
         </div>
       </div>
-      {/* Broker selector: Alpaca or AngelOne (paper mode supported) */}
       <div className="mb-4 flex items-center gap-3">
         <label className="text-sm">Broker:</label>
-        <select
-          value={brokerType}
-          onChange={(e) => {
-            const v = e.target.value as "ALPACA" | "ANGELONE";
-            setBrokerType(v);
-            try { if (typeof window !== 'undefined') localStorage.setItem('RISK_SENTRY_BROKER_TYPE', v); } catch (e) {}
-            addLog('SYSTEM', 'BROKER_SWITCH', `Broker switched to ${v}`, 'INFO');
-          }}
-          className="text-sm px-2 py-1 rounded bg-brand-input"
-        >
-          <option value="ALPACA">Alpaca (US)</option>
-          <option value="ANGELONE">AngelOne (India)</option>
-        </select>
-        {brokerType === 'ANGELONE' && (
-          <div className="flex flex-col text-xs">
-            <div className="text-xs text-muted">Paper mode supported; missing AngelOne keys will use simulator.</div>
-            <label className="flex items-center gap-2 mt-1">
-              <input
-                type="checkbox"
-                checked={!!angelUseServerCreds}
-                onChange={(e) => {
-                  const v = e.target.checked;
-                  setAngelUseServerCreds(v);
-                  try { localStorage.setItem('ANGEL_USE_SERVER_CREDS', String(v)); } catch (e) {}
-                  addLog('ANGELONE', 'SERVER_CREDS_TOGGLE', `Use server AngelOne creds: ${v}`, 'INFO');
-                }}
-                className="form-checkbox h-4 w-4"
-              />
-              <span className="text-xs">Use server AngelOne creds</span>
-            </label>
-            <div className="mt-2">
-              <button
-                onClick={handleTestLogin}
-                className="text-xs px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white"
-              >
-                Test Login
-              </button>
-            </div>
-          </div>
-        )}
+        <div className="text-sm px-2 py-1 rounded bg-brand-input">Alpaca (US market only)</div>
       </div>
       {/* Confirmation Modal */}
       {confirmModalOpen && (
@@ -6015,7 +5184,7 @@ if __name__ == "__main__":
                 </button>
                 <button
                   id="test-live-connection"
-                  onClick={handleTestConnection}
+                  onClick={handleTestLogin}
                   className="mt-2 w-full bg-brand-bg/60 border border-brand-border text-xs text-gray-300 p-2 rounded-lg hover:bg-brand-bg/70"
                 >
                   Test Live Connection
@@ -6677,7 +5846,12 @@ if __name__ == "__main__":
                           </div>
                         </td>
                         <td className="py-3.5 px-3 text-right text-gray-200">
-                          <div className="text-sm font-semibold">{pos.qty}</div>
+                          <div className="text-sm font-semibold">{Math.abs(pos.qty).toFixed(2)}</div>
+                          <div className="mt-1 inline-flex items-center justify-end gap-2 text-[10px] uppercase tracking-widest">
+                            <span className={`px-2 py-1 rounded ${pos.qty < 0 ? "bg-brand-red/10 text-brand-red" : "bg-brand-green/10 text-brand-green"}`}>
+                              {pos.qty < 0 ? "SHORT" : "LONG"}
+                            </span>
+                          </div>
                           <div className="text-[11px] text-gray-450 text-gray-400">Quote: ${pos.current_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
                         </td>
                         <td className="py-3.5 px-3 text-right text-white font-semibold">
@@ -6696,7 +5870,7 @@ if __name__ == "__main__":
                             {isPlPositive ? "+" : ""}${plVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </div>
                           <div className="text-[10px] font-medium">
-                            {isPlPositive ? "▲" : "▼"} {((plVal / (pos.qty * pos.avg_entry_price || 1)) * 100).toFixed(2)}%
+                            {isPlPositive ? "▲" : "▼"} {((plVal / (Math.abs(pos.qty) * pos.avg_entry_price || 1)) * 100).toFixed(2)}%
                           </div>
                         </td>
                         <td className="py-3.5 px-3 text-center align-middle">
@@ -7318,7 +6492,6 @@ if __name__ == "__main__":
                       <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Market Blocks</label>
                       <div className="flex flex-col gap-2">
                         <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.wallStreet} onChange={(e) => setBlockedMarkets((s) => ({...s, wallStreet: e.target.checked}))} />Block Wall Street (NYSE/NASDAQ)</label>
-                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.india} onChange={(e) => setBlockedMarkets((s) => ({...s, india: e.target.checked}))} />Block India (NSE/BSE)</label>
                       </div>
                       <p className="text-[9px] text-gray-500 mt-1">Use these to prevent autopilot from opening new BUYs on the selected markets.</p>
                     </div>
@@ -7527,11 +6700,11 @@ if __name__ == "__main__":
                       <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-[11px] text-gray-300">
                         <div>
                           <span className="text-gray-500 text-[9px] block uppercase tracking-tight">Daily ATR(14)</span>
-                          <span className="font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.atr14.toFixed(2)}</span>
+                          <span className="font-bold">{false ? "₹" : "$"}{touchTurnState.atr14.toFixed(2)}</span>
                         </div>
                         <div>
                           <span className="text-gray-500 text-[9px] block uppercase tracking-tight">ATR Threshold (25%)</span>
-                          <span className="font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.atrThreshold.toFixed(2)}</span>
+                          <span className="font-bold">{false ? "₹" : "$"}{touchTurnState.atrThreshold.toFixed(2)}</span>
                         </div>
                         <div>
                           <span className="text-gray-500 text-[9px] block uppercase tracking-tight">15m Wick High</span>
@@ -7545,7 +6718,7 @@ if __name__ == "__main__":
                           <div className="flex justify-between">
                             <span className="text-gray-400">Opening Wick Range:</span>
                             <span className="text-brand-green font-bold">
-                              {brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.rangeRange.toFixed(2)}
+                              {false ? "₹" : "$"}{touchTurnState.rangeRange.toFixed(2)}
                             </span>
                           </div>
                           <div className="flex justify-between">
@@ -7565,7 +6738,7 @@ if __name__ == "__main__":
                             Limit Entry ({touchTurnState.side}):
                           </span>
                           <span className="text-blue-300 font-bold">
-                            {brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.limitPrice.toFixed(2)}
+                            {false ? "₹" : "$"}{touchTurnState.limitPrice.toFixed(2)}
                           </span>
                         </div>
                         <div className="flex items-center justify-between">
@@ -7574,7 +6747,7 @@ if __name__ == "__main__":
                             Fib Retrace 38.2% Target:
                           </span>
                           <span className="text-brand-green font-bold">
-                            {brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.targetPrice.toFixed(2)}
+                            {false ? "₹" : "$"}{touchTurnState.targetPrice.toFixed(2)}
                           </span>
                         </div>
                         <div className="flex items-center justify-between">
@@ -7583,7 +6756,7 @@ if __name__ == "__main__":
                             Stop Loss Limit (2:1 RR):
                           </span>
                           <span className="text-brand-red font-bold">
-                            {brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.stopPrice.toFixed(2)}
+                            {false ? "₹" : "$"}{touchTurnState.stopPrice.toFixed(2)}
                           </span>
                         </div>
                       </div>
@@ -7679,7 +6852,7 @@ if __name__ == "__main__":
                           <div className="flex items-center justify-between">
                             <span className="text-gray-400 font-medium">Avg Entry Cost:</span>
                             <span className="text-brand-green font-bold">
-                              {brokerType === "ANGELONE" ? "₹" : "$"}{macdState.entryPrice.toFixed(2)}
+                              {false ? "₹" : "$"}{macdState.entryPrice.toFixed(2)}
                             </span>
                           </div>
                         )}
@@ -7744,13 +6917,13 @@ if __name__ == "__main__":
                         {/* Swing High */}
                         <div className="flex justify-between items-center bg-red-950/20 px-1.5 py-0.5 rounded border border-brand-red/10">
                           <span className="text-brand-red/70 font-semibold">🔴 Swing High (Resistance Box Edge):</span>
-                          <span className="text-brand-red font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.swingHigh.toFixed(2)}</span>
+                          <span className="text-brand-red font-bold">{false ? "₹" : "$"}{sneakyPivotState.swingHigh.toFixed(2)}</span>
                         </div>
 
                         {/* Range High */}
                         <div className="flex justify-between items-center bg-red-950/10 px-1.5 py-0.5 rounded border border-brand-red/5">
                           <span className="text-red-400 text-[9px]">🔴 Range High (Previous Day High Close):</span>
-                          <span className="text-red-300 font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.rangeHigh.toFixed(2)}</span>
+                          <span className="text-red-300 font-bold">{false ? "₹" : "$"}{sneakyPivotState.rangeHigh.toFixed(2)}</span>
                         </div>
 
                         {/* Center core status */}
@@ -7761,13 +6934,13 @@ if __name__ == "__main__":
                         {/* Range Low */}
                         <div className="flex justify-between items-center bg-emerald-950/10 px-1.5 py-0.5 rounded border border-brand-green/5">
                           <span className="text-emerald-400 text-[9px]">🟢 Range Low (Previous Day Low Close):</span>
-                          <span className="text-emerald-300 font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.rangeLow.toFixed(2)}</span>
+                          <span className="text-emerald-300 font-bold">{false ? "₹" : "$"}{sneakyPivotState.rangeLow.toFixed(2)}</span>
                         </div>
 
                         {/* Swing Low */}
                         <div className="flex justify-between items-center bg-emerald-950/20 px-1.5 py-0.5 rounded border border-brand-green/10">
                           <span className="text-brand-green/70 font-semibold">🟢 Swing Low (Support Box Edge):</span>
-                          <span className="text-brand-green font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.swingLow.toFixed(2)}</span>
+                          <span className="text-brand-green font-bold">{false ? "₹" : "$"}{sneakyPivotState.swingLow.toFixed(2)}</span>
                         </div>
                       </div>
 
@@ -7825,7 +6998,7 @@ if __name__ == "__main__":
                             <div className="flex items-center justify-between">
                               <span className="text-gray-400 font-medium">Locked Entry Cost:</span>
                               <span className="text-white font-bold">
-                                {brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.entryPrice.toFixed(2)}
+                                {false ? "₹" : "$"}{sneakyPivotState.entryPrice.toFixed(2)}
                               </span>
                             </div>
                           )}
@@ -7833,7 +7006,7 @@ if __name__ == "__main__":
                             <div className="flex items-center justify-between">
                               <span className="text-gray-400 font-medium">Pivot Exit Profit Target:</span>
                               <span className="text-brand-green font-bold">
-                                {brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.targetPrice.toFixed(2)}
+                                {false ? "₹" : "$"}{sneakyPivotState.targetPrice.toFixed(2)}
                               </span>
                             </div>
                           )}
@@ -7841,7 +7014,7 @@ if __name__ == "__main__":
                             <div className="flex items-center justify-between">
                               <span className="text-gray-400 font-medium">&quot;Guardian Angel&quot; Stop Loss:</span>
                               <span className="text-brand-red font-bold">
-                                {brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.stopPrice.toFixed(2)}
+                                {false ? "₹" : "$"}{sneakyPivotState.stopPrice.toFixed(2)}
                               </span>
                             </div>
                           )}
