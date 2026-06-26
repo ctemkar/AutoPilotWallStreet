@@ -73,6 +73,7 @@ type AutopilotOrderOutcomeCode =
   | "BLOCKED_EDGE_COST"
   | "BLOCKED_DAILY_TRADE_CAP"
   | "BLOCKED_DAILY_LOSS_LIMIT"
+  | "BLOCKED_POST_LOSS"
   | "BLOCKED_MAX_CONCURRENT"
   | "BLOCKED_EXPOSURE_CAP"
   | "BLOCKED_DISCONNECTED"
@@ -605,19 +606,19 @@ export default function MarketTerminal() {
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
-  const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
+  const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(false);
   const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean }>({ wallStreet: false });
   const [autopilotAutoSwitchEnabled, setAutopilotAutoSwitchEnabled] = useState<boolean>(true);
   const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
   const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(15); // e.g. 15% take profit
-  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(5); // e.g. 5% stop loss
+  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(3); // e.g. 3% stop loss
 
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(90); // percent of portfolio per symbol
-  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(6); // concurrent open positions
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(40); // percent of portfolio per symbol
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(4); // concurrent open positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum live order size
@@ -920,10 +921,10 @@ export default function MarketTerminal() {
   const AUTOPILOT_MIN_HOLD_MS = 8 * 60 * 1000;
   const AUTOPILOT_MAX_TRADES_PER_DAY = 18;
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.5;
-  const AUTOPILOT_MIN_ATR_PCT = 0.2;
-  const AUTOPILOT_MAX_CHOP_SCORE = 0.55;
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 10;
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.7;
+  const AUTOPILOT_MIN_ATR_PCT = 0.35;
+  const AUTOPILOT_MAX_CHOP_SCORE = 0.45;
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 20;
   const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
   const armLiquidationCooldown = useCallback((symbol: string, source: string) => {
@@ -1019,8 +1020,8 @@ export default function MarketTerminal() {
     const cashValue = isAlpaca ? parseFloat(curRef.alpacaAccount?.cash || "0") : parseFloat(curRef.simCash as any || 0);
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
-    const exposureCap = Math.min(Math.max(60, curRef.maxExposurePercentPerSymbol || 75), 100);
-    const baseExposurePct = isAlpaca ? 50 : 35;
+    const exposureCap = Math.min(Math.max(30, curRef.maxExposurePercentPerSymbol || 40), 50);
+    const baseExposurePct = isAlpaca ? 30 : 20;
     let exposurePct = baseExposurePct;
 
     if (stats) {
@@ -1039,11 +1040,11 @@ export default function MarketTerminal() {
     const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
     const maxQty = isAlpaca
       ? symbol === "BTCUSD"
-        ? 0.005
-        : 4
+        ? 0.003
+        : 2
       : symbol === "BTCUSD"
         ? 0.001
-        : 2;
+        : 1;
     let qty = Math.max(minQty, qtyFromExposure);
     qty = Math.min(qty, maxQty);
 
@@ -1377,6 +1378,18 @@ export default function MarketTerminal() {
         };
       }
 
+      if (dayGuard.realizedPnl < 0) {
+        return {
+          status: "BLOCKED",
+          code: "BLOCKED_POST_LOSS",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: `Daily P/L is negative (${dayGuard.realizedPnl.toFixed(2)}). New buy entries are blocked for the rest of the trading day.`
+        };
+      }
+
       // Regime/chop/edge guards — only in live mode and only once the price window is mature (≥12 ticks)
       const stat = autopilotMarketStatsRef.current[symbolClean];
       const priceWindow = autopilotPriceWindowRef.current[symbolClean] || [];
@@ -1575,7 +1588,9 @@ export default function MarketTerminal() {
           const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
           const isFractional = qtyNum % 1 !== 0;
           // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
-          const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+          const maxAllowedPower = (cashValue < 2000 || isFractional)
+            ? cashValue
+            : Math.min(rawBuyingPower, cashValue * 2);
           const effectiveAllowedPower = Math.max(0, maxAllowedPower);
           const maxSafeOrderVal = effectiveAllowedPower * 0.96; // enforce a smaller safety collar for fractional buy orders
 
@@ -2510,7 +2525,7 @@ export default function MarketTerminal() {
         .split(/[\s,]+/)
         .map((s: string) => s.trim().toUpperCase())
         .filter(Boolean);
-      const broadUniverseTargets = autopilotScanBroadUniverse
+      const broadUniverseTargets = (!curRef.useAlpacaLive && autopilotScanBroadUniverse)
         ? quickTickers.map((s) => s.toUpperCase())
         : [];
       const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
@@ -2561,7 +2576,7 @@ export default function MarketTerminal() {
       // When broad-universe scanning is disabled we only process a single target each scan
       // so the `autopilotInterval` pause is effective. If broad-universe is enabled, allow
       // a small batch so the system cycles through more of the universe without flooding the broker.
-      const maxTargetsPerScan = autopilotScanBroadUniverse ? 10 : 1;
+      const maxTargetsPerScan = curRef.useAlpacaLive ? 1 : (autopilotScanBroadUniverse ? 10 : 1);
       const processedScanTargets = orderedScanTargets.slice(0, Math.max(1, Math.min(orderedScanTargets.length, maxTargetsPerScan)));
 
       for (const targetSymbol of processedScanTargets) {
