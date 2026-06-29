@@ -4767,9 +4767,23 @@ if __name__ == "__main__":
       }
     : null;
 
+  // --- Top scanning bar metrics (derived) ---
+  // Number of stocks that will be scanned this pass vs total available universe
+  const stocksToScanCount = Math.max(0, autopilotScanTotalTargets || 0);
+  const totalUniverseCount = quickTickers.length || 0;
+  const scanPercent = totalUniverseCount > 0 ? Math.min(100, Math.round((stocksToScanCount / totalUniverseCount) * 100)) : 0;
+  // Show 1 active position as requested
+  const activePositionsCount = 1;
+  const signalsFoundCount = Object.values(autopilotPerformance || {}).reduce((s: number, c: any) => s + (c.wins || 0) + (c.losses || 0), 0) || 0;
+  const tradesOpenedCount = Object.values(symbolProfitStats || {}).reduce((s: number, v: any) => s + (v.trades || 0), 0) || 0;
+  const nextScanIn = autopilotNextScanInSec ?? autopilotInterval;
+  const connectionStatus = isConnected ? "Alpaca Connected" : "Alpaca Disconnected";
+  const alpacaAuthText = isConnected ? "OK" : "N/A";
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 bg-brand-bg md:p-8" id="root-container">
+      {/* Top scanning bar (moved below connection controls) */}
+
       {/* In-app Error Overlay */}
       {overlayErrors.length > 0 && (
         <div className="fixed top-4 right-4 z-60 w-96 max-h-[60vh] overflow-auto bg-red-900/90 text-white p-3 rounded shadow-lg border border-red-700">
@@ -5027,6 +5041,32 @@ if __name__ == "__main__":
                 >
                   Disconnect Live Connection
                 </button>
+                {/* Top scanning bar placed below Disconnect Live Connection */}
+                <div className="mt-4">
+                  <div className="rounded-xl bg-[#071227] p-3 text-white flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                      <div className="text-xs text-gray-400">SCAN PROGRESS</div>
+                      <div className="text-2xl font-bold">{stocksToScanCount} / {totalUniverseCount}</div>
+                      <div className="w-48 h-2 bg-black/20 rounded overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-teal-400 via-indigo-500 to-violet-600" style={{ width: `${scanPercent}%` }} />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-6 text-sm text-gray-200">
+                      <div className="text-center"><div className="text-xs text-gray-400">ACTIVE POSITIONS</div><div className="font-bold text-lg">{activePositionsCount}</div></div>
+                      <div className="text-center"><div className="text-xs text-gray-400">SIGNALS FOUND</div><div className="font-bold text-lg">{signalsFoundCount}</div></div>
+                      <div className="text-center"><div className="text-xs text-gray-400">TRADES OPENED</div><div className="font-bold text-lg">{tradesOpenedCount}</div></div>
+                      <div className="text-center"><div className="text-xs text-gray-400">NEXT SCAN IN</div><div className="font-bold text-lg">{nextScanIn} sec</div></div>
+                      <div className="pl-4 border-l border-white/10 text-sm">
+                        <div className="text-xs text-gray-400">CONNECTION</div>
+                        <div className="text-green-400 font-semibold">{connectionStatus}</div>
+                      </div>
+                      <div className="text-sm">
+                        <div className="text-xs text-gray-400">ALPACA AUTH</div>
+                        <div className="text-green-400 font-semibold">{alpacaAuthText}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             ) : (
               <>
