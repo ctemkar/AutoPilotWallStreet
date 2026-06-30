@@ -601,7 +601,7 @@ export default function MarketTerminal() {
     lastCandleAction: string;
   }>>({});
 
-  const [autopilotInterval, setAutopilotInterval] = useState(5); // temporarily reduced to 5s for broader testing
+  const [autopilotInterval, setAutopilotInterval] = useState(15); // default to 15s between scans
   const [autopilotFailurePauseSeconds, setAutopilotFailurePauseSeconds] = useState(120);
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
@@ -734,18 +734,10 @@ export default function MarketTerminal() {
       const savedInterval = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotInterval");
       if (savedInterval) {
         const parsed = Math.max(1, parseInt(savedInterval));
-        // If saved interval is larger than 5s, temporarily lower it to 5s for testing.
-        if (parsed > 5) {
-          setAutopilotInterval(5);
-          try {
-            localStorage.setItem("sentry:autopilotInterval", String(5));
-          } catch (e) {}
-        } else {
-          setAutopilotInterval(parsed);
-        }
+        setAutopilotInterval(parsed);
       } else {
-        // No saved value: default to 5s for temporary testing
-        setAutopilotInterval(5);
+        // No saved value: default to 15s
+        setAutopilotInterval(15);
       }
       const savedFailurePause = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotFailurePauseSeconds");
       if (savedFailurePause) setAutopilotFailurePauseSeconds(Math.max(30, parseInt(savedFailurePause)));
@@ -916,6 +908,48 @@ export default function MarketTerminal() {
   const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
   // Track whether we've already warned about live broad-universe batching this session
   const liveBroadWarningLoggedRef = useRef<boolean>(false);
+  // Short borrow / throttle tracking to avoid repeated short attempts when borrow unavailable
+  const shortFailureTimestampsRef = useRef<Record<string, number[]>>({});
+  const SHORT_FAILURE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+  const SHORT_FAILURE_LIMIT = 3; // after 3 failures in window, throttle
+
+  // --- AI Signal Classifier (lightweight heuristic) ---
+  const computeSignalConfidence = useCallback((stat?: AutopilotMarketStats) => {
+    if (!stat) return { label: "NEUTRAL" as const, confidence: 0 };
+    // Raw signal strength combines trend, edge vs cost, and chop penalty
+    const edgeNet = Math.abs(stat.expectedEdgeBps) - stat.estimatedCostBps;
+    const trend = Math.abs(stat.trendStrength || 0);
+    const chopPenalty = Math.max(0, Math.min(1, stat.chopScore || 0));
+    let raw = Math.max(0, edgeNet) * trend * (1 - chopPenalty);
+    // Normalize: empirical scaling to map typical ranges into 0..1
+    const confidence = Math.min(1, raw / 50);
+    const label = stat.expectedEdgeBps > stat.estimatedCostBps ? "LONG" : (stat.expectedEdgeBps < -stat.estimatedCostBps ? "SHORT" : "NEUTRAL");
+    return { label, confidence };
+  }, []);
+
+  // --- Adaptive sizing controller ---
+  const computeAdaptiveQty = useCallback((baseQty: number, confidence: number, symbol?: string) => {
+    const minQty = symbol === "BTCUSD" ? 0.0001 : 0.01;
+    // Scale between 50% and 100% of baseQty depending on confidence
+    const scale = 0.5 + 0.5 * Math.max(0, Math.min(1, confidence));
+    const raw = Math.max(minQty, baseQty * scale);
+    // Round appropriately for BTC vs equities
+    return symbol === "BTCUSD" ? parseFloat(raw.toFixed(4)) : parseFloat(raw.toFixed(2));
+  }, []);
+
+  // --- Borrow health guard: proactive check shortability via Alpaca account proxy ---
+  const checkShortability = useCallback(async (isPaperMode: boolean) => {
+    try {
+      const resp = await fetch("/api/alpaca", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ isPaper: isPaperMode }) });
+      if (!resp.ok) return null;
+      const body = await resp.json();
+      // account.shorting_enabled is provided by the server proxy
+      return body?.account?.shorting_enabled === true;
+    } catch (e) {
+      // network or server error — treat as unknown
+      return null;
+    }
+  }, []);
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
   const autopilotPendingBuyMetaRef = useRef<Record<string, { baseQty: number; submittedQty: number; submittedAt: number }>>({});
   const autopilotLossGuardBlockedUntilRef = useRef<Record<string, number>>({});
@@ -1369,6 +1403,24 @@ export default function MarketTerminal() {
     }
 
     const isEntryOrder = side === "BUY" || (side === "SELL" && (!existingPositionBeforeOrder || parseFloat(existingPositionBeforeOrder.qty || 0) <= 0));
+    // If this is a short-entry attempt, check short-throttle state
+    if (isEntryOrder && side === "SELL") {
+      const failures = shortFailureTimestampsRef.current[symbolClean] || [];
+      const now = Date.now();
+      const recent = failures.filter((t) => now - t <= SHORT_FAILURE_WINDOW_MS);
+      if (recent.length >= SHORT_FAILURE_LIMIT) {
+        addAutopilotLog(`Blocked live short of ${symbolClean}: repeated borrow/unavailability failures — throttling short attempts for ${Math.ceil(SHORT_FAILURE_WINDOW_MS / 60000)}m.`, "warn");
+        return {
+          status: "BLOCKED",
+          code: "BLOCKED_SHORT_THROTTLED",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: "Short attempts temporarily throttled due to repeated borrow/unavailability failures."
+        };
+      }
+    }
     if (isEntryOrder) {
       const dayGuard = ensureDailyGuardWindow();
       if (dayGuard.trades >= AUTOPILOT_MAX_TRADES_PER_DAY) {
@@ -1683,18 +1735,35 @@ export default function MarketTerminal() {
 
             const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
             if (!Number.isFinite(rawBuyingPower) || rawBuyingPower <= 0) {
-              addAutopilotLog(`Blocked live short of ${symbolClean}: account buying power looks insufficient to support margin shorting.`, "warn");
-              addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean} due to low buying power.`, "WARNING");
-              return {
-                status: "BLOCKED",
-                code: "BLOCKED_BUYING_POWER",
-                symbol: symbolClean,
-                side,
-                requestedQty: qtyNum,
-                executedQty: 0,
-                message: "Account buying power insufficient for live shorting."
-              };
+                  addAutopilotLog(`Blocked live short of ${symbolClean}: account buying power looks insufficient to support margin shorting.`, "warn");
+                  addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean} due to low buying power.`, "WARNING");
+                  // record failure timestamp for shortability throttling
+                  shortFailureTimestampsRef.current[symbolClean] = (shortFailureTimestampsRef.current[symbolClean] || []).concat(Date.now());
+                  return {
+                    status: "BLOCKED",
+                    code: "BLOCKED_BUYING_POWER",
+                    symbol: symbolClean,
+                    side,
+                    requestedQty: qtyNum,
+                    executedQty: 0,
+                    message: "Account buying power insufficient for live shorting."
+                  };
             }
+
+                // If account reports shorting disabled proactively, record and block
+                if (curRef.alpacaAccount && typeof curRef.alpacaAccount.shorting_enabled !== "undefined" && !curRef.alpacaAccount.shorting_enabled) {
+                  addAutopilotLog(`Blocked live short of ${symbolClean}: Alpaca account reports shorting disabled.`, "warn");
+                  shortFailureTimestampsRef.current[symbolClean] = (shortFailureTimestampsRef.current[symbolClean] || []).concat(Date.now());
+                  return {
+                    status: "BLOCKED",
+                    code: "BLOCKED_SHORT_RESTRICTED",
+                    symbol: symbolClean,
+                    side,
+                    requestedQty: qtyNum,
+                    executedQty: 0,
+                    message: "Account settings disallow short-selling."
+                  };
+                }
 
             addAutopilotLog(`Live shorting allowed by config: attempting short ${qtyNum} ${symbolClean}.`, "info");
             addLog(symbolClean, "AUTO_SELL_ALLOWED", `Live short allowed by config; proceeding to submit SELL ${qtyNum}.`, "INFO");
@@ -1706,6 +1775,21 @@ export default function MarketTerminal() {
         }
       }
 
+      // Generate a short, deterministic trade rationale for explainability
+      const generateTradeRationale = (s: string, sd: "BUY" | "SELL", qty: number) => {
+        const stat = autopilotMarketStatsRef.current[s] || null;
+        if (!stat) return `No market stats available; decision based on default sizing (${qty}).`;
+        const parts: string[] = [];
+        parts.push(sd === "BUY" ? "Long bias" : "Short bias");
+        parts.push(`trend ${stat.trendStrength.toFixed(2)}`);
+        parts.push(`atr% ${stat.atrPct.toFixed(2)}%`);
+        parts.push(`edge ${stat.expectedEdgeBps.toFixed(1)}bps vs cost ${stat.estimatedCostBps.toFixed(1)}bps`);
+        if (stat.chopScore) parts.push(`chop ${stat.chopScore.toFixed(2)}`);
+        return parts.join(" | ");
+      };
+
+      const rationale = generateTradeRationale(symbolClean, side, finalQty);
+      addAutopilotLog(`Rationale: ${rationale}`, "info");
       addAutopilotLog(`[Bot Order] Validated ${side} ${finalQty} ${symbolClean}. Submitting market order...`, "trade");
       addLog("AUTOPILOT", side, `Transmitting Bot Order: ${side} ${finalQty} shares of ${symbolClean}`, "INFO");
       const release = await orderMutexRef.current.acquire();
@@ -2712,11 +2796,29 @@ export default function MarketTerminal() {
           const strongDownTrend = !!stat && stat.trendStrength <= -Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.6);
 
           if (hasStrongEdge && strongTrend && seedQtyLong > 0) {
-            const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", seedQtyLong);
+            // compute confidence and adapt sizing
+            const sig = computeSignalConfidence(stat);
+            const adjQty = computeAdaptiveQty(seedQtyLong, sig.confidence, targetSymbol);
+            addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence*100)}% confidence. Using qty ${adjQty}.`, "info");
+            const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", adjQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
           } else if (hasStrongShortEdge && strongDownTrend && seedQtyShort > 0) {
             // Attempt a short-entry SELL when a clear downtrend + negative edge exists
-            const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", seedQtyShort);
+            // Proactively check shortability where possible
+            const shortable = await checkShortability(curRef.isPaper);
+            if (shortable === false) {
+              addAutopilotLog(`Short blocked by borrow health guard for ${targetSymbol}: account marked non-shortable.`, "warn");
+              shortFailureTimestampsRef.current[targetSymbol] = (shortFailureTimestampsRef.current[targetSymbol] || []).concat(Date.now());
+              continue;
+            }
+            const sig = computeSignalConfidence(stat);
+            const adjQty = computeAdaptiveQty(seedQtyShort, sig.confidence, targetSymbol);
+            addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence*100)}% confidence. Using qty ${adjQty}.`, "info");
+            const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", adjQty);
+            // If broker rejects due to borrow/unavailability, record timestamp for throttling
+            if (orderOutcome.status === "REJECTED" && orderOutcome.message && /borrow|short|unable to short|not allowed to short/i.test(orderOutcome.message)) {
+              shortFailureTimestampsRef.current[targetSymbol] = (shortFailureTimestampsRef.current[targetSymbol] || []).concat(Date.now());
+            }
             logScanOrderOutcome("SCALPER", orderOutcome);
           } else {
             addAutopilotLog(`Skipped scalper entry for ${targetSymbol}: no clear long/short edge.`, "info");
