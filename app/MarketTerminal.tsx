@@ -914,6 +914,8 @@ export default function MarketTerminal() {
   // Derived counts
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
   const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
+  // Track whether we've already warned about live broad-universe batching this session
+  const liveBroadWarningLoggedRef = useRef<boolean>(false);
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
   const autopilotPendingBuyMetaRef = useRef<Record<string, { baseQty: number; submittedQty: number; submittedAt: number }>>({});
   const autopilotLossGuardBlockedUntilRef = useRef<Record<string, number>>({});
@@ -2601,7 +2603,10 @@ export default function MarketTerminal() {
         : (autopilotScanBroadUniverse ? 10 : 1);
 
       if (curRef.useAlpacaLive && autopilotScanBroadUniverse) {
-        addAutopilotLog(`Broad Universe Scan enabled in LIVE mode — processing up to ${maxTargetsPerScan} targets per scan. Monitor broker rate limits.`, "warn");
+        if (!liveBroadWarningLoggedRef.current) {
+          addAutopilotLog(`Broad Universe Scan enabled in LIVE mode — processing up to ${maxTargetsPerScan} targets per scan. Monitor broker rate limits.`, "warn");
+          liveBroadWarningLoggedRef.current = true;
+        }
       }
       const processedScanTargets = orderedScanTargets.slice(0, Math.max(1, Math.min(orderedScanTargets.length, maxTargetsPerScan)));
 
