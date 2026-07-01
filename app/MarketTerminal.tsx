@@ -1278,6 +1278,10 @@ export default function MarketTerminal() {
   });
 
   useEffect(() => {
+    // Clear short failure throttles on (re)load to allow fresh short attempts
+    try {
+      shortFailureTimestampsRef.current = {};
+    } catch (e) {}
     stateRef.current = {
       useAlpacaLive,
       allowLiveShorts,
