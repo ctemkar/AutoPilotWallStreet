@@ -4985,7 +4985,9 @@ if __name__ == "__main__":
   const scanProcessed = Math.max(0, displayScanned || 0);
   const scanPercent = scanTotal > 0 ? Math.min(100, Math.round((scanProcessed / scanTotal) * 100)) : 0;
   // Show 1 active position as requested
-  const activePositionsCount = 1;
+  const activePositionsCount = (useAlpacaLive ? (alpacaPositions || []) : (mockPositions || []))
+    .filter((p: any) => Math.abs(parseFloat(String(p?.qty || 0))) > 0)
+    .length;
   const signalsFoundCount = Object.values(autopilotPerformance || {}).reduce((s: number, c: any) => s + (c.wins || 0) + (c.losses || 0), 0) || 0;
   const tradesOpenedCount = Object.values(symbolProfitStats || {}).reduce((s: number, v: any) => s + (v.trades || 0), 0) || 0;
   const nextScanIn = autopilotNextScanInSec ?? autopilotInterval;
