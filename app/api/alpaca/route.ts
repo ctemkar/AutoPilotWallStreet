@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
-const FETCH_TIMEOUT_MS = 30000;
+const FETCH_TIMEOUT_MS = 60000;
 
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -13,14 +13,14 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-async function fetchWithRetries(url: string, options: RequestInit = {}, retries = 2) {
+async function fetchWithRetries(url: string, options: RequestInit = {}, retries = 3, timeoutMs = FETCH_TIMEOUT_MS) {
   for (let i = 0; i <= retries; i++) {
     try {
-      return await fetchWithTimeout(url, options, FETCH_TIMEOUT_MS);
-    } catch (e) {
+      return await fetchWithTimeout(url, options, timeoutMs);
+    } catch (e: any) {
       if (i === retries) throw e;
-      // small backoff
-      await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+      const backoff = Math.min(2000, 500 * Math.pow(2, i));
+      await new Promise((r) => setTimeout(r, backoff));
     }
   }
 }
