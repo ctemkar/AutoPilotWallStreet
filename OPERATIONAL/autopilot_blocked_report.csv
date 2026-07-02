@@ -1,0 +1,3 @@
+source,action,qty,reason,sandbox,raw
+autopilot_blocked_log.json,HOLD,5,"Holding due to undefined portfolio metrics to avoid unauthorized risk.",false,"{\"action\":\"HOLD\",\"qty\":5,\"reason\":\"Holding due to undefined portfolio metrics to avoid unauthorized risk.\",\"sandbox\":false}"
+autopilot_blocked_sweep.json,BUY,5,"Initiating a starter position in RELIANCE as there are no current active holdings.",false,"{\"action\":\"BUY\",\"qty\":5,\"reason\":\"Initiating a starter position in RELIANCE as there are no current active holdings.\",\"sandbox\":false}"

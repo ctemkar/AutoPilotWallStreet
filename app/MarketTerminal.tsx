@@ -927,11 +927,53 @@ export default function MarketTerminal() {
     return { label, confidence };
   }, []);
 
+  // Wrapper to set last outcome with verbose logging for BLOCKED reasons
+  const setLastAutopilotOutcomeVerbose = useCallback((val: AutopilotOrderResult | ((prev: AutopilotOrderResult | null) => AutopilotOrderResult | null)) => {
+    setLastAutopilotOrderOutcome((prev) => {
+      const next = typeof val === "function" ? (val as any)(prev) : val;
+      if (!next) return next;
+      try {
+        const qty = next.executedQty > 0 ? next.executedQty : next.requestedQty;
+        // Attach per-symbol market stats snapshot for BLOCKED/REJECTED outcomes
+        let statsSnapshot: any = null;
+        try {
+          const symbolKey = (next.symbol || "").toUpperCase();
+          statsSnapshot = (autopilotMarketStatsRef.current || {})[symbolKey] || null;
+        } catch (e) {
+          statsSnapshot = null;
+        }
+        const statsText = statsSnapshot ? ` | stats:${JSON.stringify({ expectedEdgeBps: statsSnapshot.expectedEdgeBps, estimatedCostBps: statsSnapshot.estimatedCostBps, chopScore: statsSnapshot.chopScore, trendStrength: statsSnapshot.trendStrength, atrPct: statsSnapshot.atrPct, netMovePct: statsSnapshot.netMovePct })}` : "";
+        if (next.status === "BLOCKED") {
+          addAutopilotLog(`[BLOCKED] ${next.code} ${next.side} ${qty} ${next.symbol} — ${next.message}${statsText}`, "warn");
+          console.warn(`[AUTOPILOT][BLOCKED] ${next.code} ${next.side} ${qty} ${next.symbol} — ${next.message}${statsText}`);
+          // persist a detailed CSV-friendly log entry to OPERATIONAL via an API route if available
+          try {
+            // fire-and-forget
+            fetch('/api/operational/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ timestamp: Date.now(), outcome: next, stats: statsSnapshot }) }).catch(() => {});
+          } catch (e) {}
+        } else if (next.status === "REJECTED") {
+          addAutopilotLog(`[REJECTED] ${next.code} ${next.side} ${qty} ${next.symbol} — ${next.message}${statsText}`, "warn");
+          console.warn(`[AUTOPILOT][REJECTED] ${next.code} ${next.side} ${qty} ${next.symbol} — ${next.message}${statsText}`);
+          try {
+            fetch('/api/operational/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ timestamp: Date.now(), outcome: next, stats: statsSnapshot }) }).catch(() => {});
+          } catch (e) {}
+        } else if (next.status === "FILLED") {
+          addAutopilotLog(`[FILLED] ${next.side} ${qty} ${next.symbol} (${next.code})`, "success");
+        } else if (next.status === "PENDING") {
+          addAutopilotLog(`[PENDING] ${next.side} ${next.requestedQty} ${next.symbol} (${next.code}) - ${next.message}`, "info");
+        }
+      } catch (e) {
+        // swallow logging errors
+      }
+      return next;
+    });
+  }, [addAutopilotLog]);
+
   // --- Adaptive sizing controller ---
   const computeAdaptiveQty = useCallback((baseQty: number, confidence: number, symbol?: string) => {
     const minQty = symbol === "BTCUSD" ? 0.0001 : 0.01;
-    // Scale between 50% and 100% of baseQty depending on confidence
-    const scale = 0.5 + 0.5 * Math.max(0, Math.min(1, confidence));
+    // Scale between 70% and 100% of baseQty depending on confidence (less aggressive downscaling)
+    const scale = 0.7 + 0.3 * Math.max(0, Math.min(1, confidence));
     const raw = Math.max(minQty, baseQty * scale);
     // Round appropriately for BTC vs equities
     return symbol === "BTCUSD" ? parseFloat(raw.toFixed(4)) : parseFloat(raw.toFixed(2));
@@ -1091,7 +1133,7 @@ export default function MarketTerminal() {
     const maxQty = isAlpaca
       ? symbol === "BTCUSD"
         ? 0.003
-        : 2
+        : 6
       : symbol === "BTCUSD"
         ? 0.001
         : 1;
@@ -1221,7 +1263,7 @@ export default function MarketTerminal() {
             delete autopilotPendingBuyMetaRef.current[sym];
           }
         }
-        setLastAutopilotOrderOutcome((prev) => {
+        setLastAutopilotOutcomeVerbose((prev) => {
           if (!prev || prev.status !== "PENDING") return prev;
           const sym = String(prev.symbol || "").toUpperCase();
           const meta = autopilotPendingBuyMetaRef.current[sym];
@@ -1913,7 +1955,7 @@ export default function MarketTerminal() {
             const richMsg = errMsg + balNote;
             if ((insufficientUsdtCooldownRef.current || 0) < now) {
               addAutopilotLog(`⚠️ Binance USDT too low for ${symbolClean}: ${richMsg}`, "warn");
-              setLastAutopilotOrderOutcome({ status: "BLOCKED", code: "BLOCKED_INSUFFICIENT_USDT", symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: richMsg });
+              setLastAutopilotOutcomeVerbose({ status: "BLOCKED", code: "BLOCKED_INSUFFICIENT_USDT", symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: richMsg });
               lastErrorOutcomeAtRef.current = now;
               insufficientUsdtCooldownRef.current = now + 60 * 1000; // 60s cooldown
             }
@@ -1959,7 +2001,7 @@ export default function MarketTerminal() {
             setTimeout(() => {
               autopilotPendingBuySymbolsRef.current.delete(symbolClean);
               delete autopilotPendingBuyMetaRef.current[symbolClean];
-              setLastAutopilotOrderOutcome((prev) => {
+              setLastAutopilotOutcomeVerbose((prev) => {
                 if (!prev || prev.status !== "PENDING" || prev.symbol !== symbolClean) return prev;
                 return {
                   ...prev,
@@ -2450,7 +2492,7 @@ export default function MarketTerminal() {
     const isError = outcome.status === "BLOCKED" || outcome.status === "REJECTED";
     const isGood  = outcome.status === "FILLED"  || outcome.status === "PENDING";
 
-    setLastAutopilotOrderOutcome((prev) => {
+    setLastAutopilotOutcomeVerbose((prev) => {
       const prevIsError = prev && (prev.status === "BLOCKED" || prev.status === "REJECTED");
       const errorStillSticky = prevIsError && (now - lastErrorOutcomeAtRef.current) < ERROR_OUTCOME_STICKY_MS;
 
@@ -2772,7 +2814,7 @@ export default function MarketTerminal() {
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
         const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
         const liveBudget = isLiveMode
-          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.10)
+          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.25)
           : 0;
         const liveMinQty = Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
