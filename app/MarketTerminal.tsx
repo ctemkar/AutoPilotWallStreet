@@ -1016,7 +1016,7 @@ export default function MarketTerminal() {
   const AUTOPILOT_MIN_TREND_STRENGTH = 0.7;
   const AUTOPILOT_MIN_ATR_PCT = 0.35;
   const AUTOPILOT_MAX_CHOP_SCORE = 0.45;
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 20;
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 60;
   const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
   const armLiquidationCooldown = useCallback((symbol: string, source: string) => {
