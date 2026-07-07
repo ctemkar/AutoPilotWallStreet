@@ -31,7 +31,7 @@ except Exception:
     load_dotenv = None
 
 
-LIQUIDATE_SCRIPT_VERSION = "2026-07-07-r3"
+LIQUIDATE_SCRIPT_VERSION = "2026-07-07-r4"
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,6 +127,17 @@ def extract_related_orders(payload: Any) -> List[str]:
         return []
     raw = payload.get("related_orders") or []
     return [str(x) for x in raw if str(x).strip()]
+
+
+def extract_order_ids_for_symbol(open_orders: List[Dict[str, Any]], symbol: str) -> List[str]:
+    ids: List[str] = []
+    target = symbol.upper().strip()
+    for order in open_orders:
+        order_symbol = str(order.get("symbol", "")).upper().strip()
+        order_id = str(order.get("id", "")).strip()
+        if order_symbol == target and order_id:
+            ids.append(order_id)
+    return ids
 
 
 def request_or_none(
@@ -312,6 +323,7 @@ def main() -> int:
         print(f"Retry pass {pass_num}: {len(unresolved)} unresolved positions...")
         # Do not blanket-cancel at each pass; that can cancel fresh close orders before they fill.
         # Only cancel when Alpaca indicates held-order lock for a specific symbol.
+        open_orders_snapshot = fetch_open_orders(base_url, headers, args.timeout, args.request_retries)
 
         for position in unresolved:
             symbol = str(position.get("symbol", "")).upper()
@@ -349,7 +361,26 @@ def main() -> int:
                         print(f"Closed {symbol} after related-order cancel retry.")
                         continue
                 else:
-                    print(f"{symbol} is locked by held orders; waiting for next pass.")
+                    symbol_order_ids = extract_order_ids_for_symbol(open_orders_snapshot, symbol)
+                    if symbol_order_ids:
+                        print(f"{symbol} is locked by held orders; canceling {len(symbol_order_ids)} open orders for this symbol.")
+                        for order_id in symbol_order_ids:
+                            cancel_order_by_id(base_url, headers, order_id, args.timeout, args.request_retries)
+                        pending_after_symbol_cancel = wait_for_open_orders_to_clear(
+                            base_url,
+                            headers,
+                            args.timeout,
+                            min(10, args.wait_seconds),
+                            args.request_retries,
+                        )
+                        if pending_after_symbol_cancel:
+                            print(f"Note: {len(pending_after_symbol_cancel)} orders still open after symbol-order cancel attempts.")
+                        retry_resp = close_symbol(base_url, headers, symbol, args.timeout, args.request_retries)
+                        if retry_resp is not None and retry_resp.ok:
+                            print(f"Closed {symbol} after symbol-order cancel retry.")
+                            continue
+                    else:
+                        print(f"{symbol} is locked by held orders; no symbol-matching open orders found, waiting for next pass.")
                 # Do not place fallback order here; that can create another hold lock cycle.
                 continue
 

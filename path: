@@ -1,0 +1,24 @@
+Script started on Tue Jul  7 11:47:45 2026
+Command: /Users/chetantemkar/development/DifferentTradingStrategies/liquidate.py
+d orders; waiting for next pass.
+T is locked by held orders; waiting for next pass.
+Pass 1: 10 open close/order requests pending; waiting before next pass.
+Retry pass 2: 10 unresolved positions...
+AMZN is locked by held orders; waiting for next pass.
+CHTR is locked by held orders; waiting for next pass.
+GOOG is locked by held orders; waiting for next pass.
+LYFT is locked by held orders; waiting for next pass.
+META is locked by held orders; waiting for next pass.
+MNST is locked by held orders; waiting for next pass.
+MSFT is locked by held orders; waiting for next pass.
+MU is locked by held orders; waiting for next pass.
+NVDA is locked by held orders; waiting for next pass.
+T is locked by held orders; waiting for next pass.
+Pass 2: 10 open close/order requests pending; waiting before next pass.
+Retry pass 3: 10 unresolved positions...
+AMZN is locked by held orders; waiting for next pass.
+CHTR is locked by held orders; waiting for next pass.
+GOOG is locked by held orders; waiting for next pass.script: /Users/chetantemkar/development/DifferentTradingStrategies/liquidate.py: Permission denied
+
+Command exit status: 1
+Script done on Tue Jul  7 11:47:47 2026
