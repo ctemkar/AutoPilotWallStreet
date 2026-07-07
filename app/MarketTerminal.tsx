@@ -1045,6 +1045,87 @@ export default function MarketTerminal() {
     return false;
   }, []);
 
+  const exitGateStatus = useMemo(() => {
+    if (!isAutopilotActive) {
+      return {
+        tone: "neutral" as const,
+        title: "Autopilot Paused",
+        detail: "Exit automation is idle until autopilot is enabled.",
+      };
+    }
+
+    if (marketSession === "CLOSED") {
+      return {
+        tone: "blocked" as const,
+        title: "Exit Blocked: Market Closed",
+        detail: "Non-crypto exits are blocked outside ET pre/regular/extended sessions.",
+      };
+    }
+
+    const activePositions = useAlpacaLive ? (alpacaPositions || []) : (mockPositions || []);
+    const longPositions = activePositions.filter((p: any) => parseFloat(String(p?.qty || 0)) > 0);
+    if (longPositions.length === 0) {
+      return {
+        tone: "neutral" as const,
+        title: "No Open Long Positions",
+        detail: "Nothing to close right now.",
+      };
+    }
+
+    const preferredSymbol = (autopilotCurrentScanTarget || "").toUpperCase().trim();
+    if (!preferredSymbol) {
+      return {
+        tone: "neutral" as const,
+        title: "No Active Scan Target",
+        detail: "Waiting for the next autopilot target before evaluating close gates.",
+      };
+    }
+
+    const activePos = longPositions.find((p: any) => String(p.symbol || "").toUpperCase() === preferredSymbol);
+    if (!activePos) {
+      return {
+        tone: "neutral" as const,
+        title: `No Open Long For Target (${preferredSymbol})`,
+        detail: "Current scan symbol has no long position to close.",
+      };
+    }
+    const symbol = String(activePos.symbol || "").toUpperCase();
+    const openedMeta = autopilotPositionOpenedAtRef.current[symbol];
+    if (openedMeta) {
+      const heldMs = Date.now() - openedMeta.openedAt;
+      const holdLeftMs = AUTOPILOT_MIN_HOLD_MS - heldMs;
+      if (holdLeftMs > 0 && !isLossMakingPosition(activePos)) {
+        return {
+          tone: "blocked" as const,
+          title: `Exit Blocked: Min Hold (${symbol})`,
+          detail: `${Math.ceil(holdLeftMs / 1000)}s remaining before a normal SELL is allowed.`,
+        };
+      }
+    }
+
+    const entry = parseFloat(String(activePos.avg_entry_price || 0));
+    const nowPx = parseFloat(String(activePos.current_price || 0));
+    const pnlPct = entry > 0 && nowPx > 0 ? ((nowPx - entry) / entry) * 100 : NaN;
+    const pnlText = Number.isFinite(pnlPct) ? ` Current P/L ${pnlPct.toFixed(2)}%.` : "";
+
+    return {
+      tone: "ready" as const,
+      title: `Exit Ready (${symbol})`,
+      detail: `Monitoring TP ${globalTakeProfitPercent}% / SL ${globalStopLossPercent}% for deterministic close.${pnlText}`,
+    };
+  }, [
+    isAutopilotActive,
+    marketSession,
+    useAlpacaLive,
+    alpacaPositions,
+    mockPositions,
+    autopilotCurrentScanTarget,
+    AUTOPILOT_MIN_HOLD_MS,
+    globalTakeProfitPercent,
+    globalStopLossPercent,
+    isLossMakingPosition,
+  ]);
+
   const recordSymbolProfit = useCallback((symbolClean: string, realizedPnl: number) => {
     const key = String(symbolClean || "").toUpperCase().trim();
     if (!key) return;
@@ -6434,6 +6515,19 @@ if __name__ == "__main__":
                       Broker fill pending: {lastAutopilotOrderOutcome.side} {lastAutopilotOrderOutcome.requestedQty} {lastAutopilotOrderOutcome.symbol}. Waiting for broker confirmation before next seed buy.
                     </div>
                   )}
+                  <div
+                    id="autopilot-exit-gate-status"
+                    className={`mt-2 rounded-md border px-2.5 py-2 text-[10px] font-mono ${
+                      exitGateStatus.tone === "blocked"
+                        ? "border-red-600/70 bg-red-950/30 text-red-200"
+                        : exitGateStatus.tone === "ready"
+                          ? "border-emerald-600/60 bg-emerald-950/20 text-emerald-200"
+                          : "border-brand-border bg-brand-bg/60 text-gray-300"
+                    }`}
+                  >
+                    <div className="font-semibold uppercase tracking-wide">Exit Gate Status: {exitGateStatus.title}</div>
+                    <div className="mt-1 text-[10px] opacity-90">{exitGateStatus.detail}</div>
+                  </div>
                 </div>
 
                 {/* Configurator parameters inside standard flex rows */}
