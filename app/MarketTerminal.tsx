@@ -1937,21 +1937,31 @@ export default function MarketTerminal() {
             body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: cryptoQtyToSend, isLive: true, openShort: side === "SELL", preferredUsdt, preferredSource }),
           });
         } else {
-          // Send USD notional for equities so we can buy fractional shares by dollar amount
-          const notionalUsd = parseFloat((finalQty * liveEstimatedPrice).toFixed(2));
-          try { console.debug(`[AUTOPILOT][DEBUG] sending equity order as notional=${notionalUsd} USD for ${symbolClean} (finalQty=${finalQty}, estPrice=${liveEstimatedPrice})`); } catch (e) {}
+          // Use notional for BUY (fractional-friendly), but use share qty for SELL to avoid accidental short rejections.
+          const equityOrderPayload: Record<string, any> = {
+            apiKey: curRef.apiKey,
+            apiSecret: curRef.apiSecret,
+            isPaper: curRef.isPaper,
+            symbol: symbolClean,
+            side: side.toLowerCase(),
+            estimatedPrice: liveEstimatedPrice,
+          };
+
+          if (side === "BUY") {
+            const notionalUsd = parseFloat((finalQty * liveEstimatedPrice).toFixed(2));
+            equityOrderPayload.notional = notionalUsd;
+            try { console.debug(`[AUTOPILOT][DEBUG] sending equity BUY as notional=${notionalUsd} USD for ${symbolClean} (finalQty=${finalQty}, estPrice=${liveEstimatedPrice})`); } catch (e) {}
+          } else {
+            const ownedQty = Math.max(0, parseFloat(String(existingPositionBeforeOrder?.qty || 0)));
+            const sellQty = ownedQty > 0 ? Math.min(finalQty, ownedQty) : finalQty;
+            equityOrderPayload.qty = parseFloat(sellQty.toFixed(6));
+            try { console.debug(`[AUTOPILOT][DEBUG] sending equity SELL as qty=${equityOrderPayload.qty} for ${symbolClean} (ownedQty=${ownedQty}, finalQty=${finalQty})`); } catch (e) {}
+          }
+
           response = await fetch("/api/alpaca/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              apiKey: curRef.apiKey,
-              apiSecret: curRef.apiSecret,
-              isPaper: curRef.isPaper,
-              symbol: symbolClean,
-              notional: notionalUsd,
-              side: side.toLowerCase(),
-              estimatedPrice: liveEstimatedPrice,
-            }),
+            body: JSON.stringify(equityOrderPayload),
           });
         }
 
