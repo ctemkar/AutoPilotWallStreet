@@ -606,8 +606,9 @@ export default function MarketTerminal() {
   const [autopilotFailurePauseSeconds, setAutopilotFailurePauseSeconds] = useState(120);
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
-  const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL,MSFT,NVDA,META,AMZN,GOOG");
-  const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(false);
+  const DEFAULT_AUTOPILOT_TARGET_TICKERS = "AAPL,MSFT,JPM,XOM,JNJ,WMT,NEE,CAT,PG,UNH";
+  const [autopilotTargetTicker, setAutopilotTargetTicker] = useState(DEFAULT_AUTOPILOT_TARGET_TICKERS);
+  const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
   const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean }>({ wallStreet: false });
   const [autopilotAutoSwitchEnabled, setAutopilotAutoSwitchEnabled] = useState<boolean>(true);
   const [activeVisualizerSymbol] = useState<string>("");
@@ -1063,12 +1064,16 @@ export default function MarketTerminal() {
   }, []);
 
   const autopilotScanList = useMemo(() => {
-    const parsedTargets = (autopilotTargetTicker || "AAPL")
+    const parsedTargets = (autopilotTargetTicker || DEFAULT_AUTOPILOT_TARGET_TICKERS)
+      .split(/[\s,]+/)
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+    const fallbackTargets = DEFAULT_AUTOPILOT_TARGET_TICKERS
       .split(/[\s,]+/)
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean);
     const broadUniverseTargets = autopilotScanBroadUniverse ? quickTickers.map((s) => s.toUpperCase()) : [];
-    const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
+    const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : fallbackTargets), ...broadUniverseTargets]));
 
     let scanTargets = [...baseTargets];
     const marketSessionNow = getMarketSessionET();
@@ -1077,7 +1082,7 @@ export default function MarketTerminal() {
     }
 
     if (scanTargets.length === 0) {
-      const dynamicPool = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...quickTickers.map((s) => s.toUpperCase())]));
+      const dynamicPool = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : fallbackTargets), ...quickTickers.map((s) => s.toUpperCase())]));
       scanTargets = [...dynamicPool];
     }
 
@@ -1172,8 +1177,9 @@ export default function MarketTerminal() {
     const maxP = Math.max(...next);
     const minP = Math.min(...next);
     const rangePct = first > 0 ? ((maxP - minP) / first) * 100 : 0;
-    const netMovePct = first > 0 ? (Math.abs(last - first) / first) * 100 : 0;
-    const trendStrength = rangePct > 0 ? Math.min(1, netMovePct / rangePct) : 0;
+    // Preserve direction so uptrends and downtrends are scored with opposite signs.
+    const netMovePct = first > 0 ? ((last - first) / first) * 100 : 0;
+    const trendStrength = rangePct > 0 ? Math.max(-1, Math.min(1, netMovePct / rangePct)) : 0;
 
     let absReturns = 0;
     for (let i = 1; i < next.length; i += 1) {
@@ -1181,7 +1187,7 @@ export default function MarketTerminal() {
       if (base > 0) absReturns += Math.abs((next[i] - base) / base);
     }
     const atrPct = ((absReturns / Math.max(1, next.length - 1)) * 100);
-    const chopScore = Math.max(0, 1 - trendStrength);
+    const chopScore = Math.max(0, Math.min(1, 1 - Math.abs(trendStrength)));
     const expectedEdgeBps = trendStrength * atrPct * 100;
     const estimatedCostBps = getEstimatedCostBps(sym);
 
@@ -1508,8 +1514,12 @@ export default function MarketTerminal() {
       // Regime/chop/edge guards — only in live mode and only once the price window is mature (≥12 ticks)
       const stat = autopilotMarketStatsRef.current[symbolClean];
       const priceWindow = autopilotPriceWindowRef.current[symbolClean] || [];
-      if (curRef.useAlpacaLive && stat && priceWindow.length >= 12) {
-        if (stat.trendStrength < AUTOPILOT_MIN_TREND_STRENGTH) {
+        if (curRef.useAlpacaLive && stat && priceWindow.length >= 12) {
+        const trendThreshold = AUTOPILOT_MIN_TREND_STRENGTH;
+        const meetsDirectionalTrend = side === "BUY"
+          ? stat.trendStrength >= trendThreshold
+          : stat.trendStrength <= -trendThreshold;
+        if (!meetsDirectionalTrend) {
           addAutopilotLog(`🚫 Regime filter: ${symbolClean} trend ${stat.trendStrength.toFixed(2)} < ${AUTOPILOT_MIN_TREND_STRENGTH}. Skipping entry.`, "warn");
           return {
             status: "BLOCKED",
@@ -1518,7 +1528,9 @@ export default function MarketTerminal() {
             side,
             requestedQty: qtyNum,
             executedQty: 0,
-            message: `Trend strength ${stat.trendStrength.toFixed(2)} below regime threshold ${AUTOPILOT_MIN_TREND_STRENGTH.toFixed(2)}.`
+            message: side === "BUY"
+              ? `Trend strength ${stat.trendStrength.toFixed(2)} below long threshold ${AUTOPILOT_MIN_TREND_STRENGTH.toFixed(2)}.`
+              : `Trend strength ${stat.trendStrength.toFixed(2)} above short threshold -${AUTOPILOT_MIN_TREND_STRENGTH.toFixed(2)}.`
           };
         }
 
@@ -1535,7 +1547,11 @@ export default function MarketTerminal() {
           };
         }
 
-        if (stat.expectedEdgeBps <= stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS) {
+        const edgeThreshold = stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
+        const hasDirectionalEdge = side === "BUY"
+          ? stat.expectedEdgeBps > edgeThreshold
+          : stat.expectedEdgeBps < -edgeThreshold;
+        if (!hasDirectionalEdge) {
           addAutopilotLog(`🚫 Edge/cost: ${symbolClean} edge ${stat.expectedEdgeBps.toFixed(1)}bps ≤ cost ${stat.estimatedCostBps.toFixed(1)}bps + buffer. Skipping entry.`, "warn");
           return {
             status: "BLOCKED",
@@ -1544,7 +1560,9 @@ export default function MarketTerminal() {
             side,
             requestedQty: qtyNum,
             executedQty: 0,
-            message: `Expected edge ${stat.expectedEdgeBps.toFixed(1)}bps not above cost ${stat.estimatedCostBps.toFixed(1)}bps + buffer.`
+            message: side === "BUY"
+              ? `Expected long edge ${stat.expectedEdgeBps.toFixed(1)}bps not above cost ${stat.estimatedCostBps.toFixed(1)}bps + buffer.`
+              : `Expected short edge ${stat.expectedEdgeBps.toFixed(1)}bps not below -${stat.estimatedCostBps.toFixed(1)}bps - buffer.`
           };
         }
       }
@@ -2710,9 +2728,13 @@ export default function MarketTerminal() {
       const currentOpenCounts = computeOpenCounts(currentActivePositions);
       const maxOpenPositions = curRef.maxConcurrentPositions || 999;
 
-      const parsedTargets = (curRef.autopilotTargetTicker || "AAPL")
+      const parsedTargets = (curRef.autopilotTargetTicker || DEFAULT_AUTOPILOT_TARGET_TICKERS)
         .split(/[\s,]+/)
         .map((s: string) => s.trim().toUpperCase())
+        .filter(Boolean);
+      const fallbackTargets = DEFAULT_AUTOPILOT_TARGET_TICKERS
+        .split(/[\s,]+/)
+        .map((s) => s.trim().toUpperCase())
         .filter(Boolean);
       // Allow broad-universe targets when the user has enabled the option.
       // Previously this was disabled in live mode for safety; allow it here
@@ -2720,9 +2742,9 @@ export default function MarketTerminal() {
       const broadUniverseTargets = (autopilotScanBroadUniverse)
         ? quickTickers.map((s) => s.toUpperCase())
         : [];
-      const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
+      const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : fallbackTargets), ...broadUniverseTargets]));
       const equityTargets = baseTargets.filter((sym: string) => !isCryptoSymbol(sym));
-      let scanTargets = equityTargets.length > 0 ? equityTargets : ["AAPL"];
+      let scanTargets = equityTargets.length > 0 ? equityTargets : fallbackTargets;
       if (equityTargets.length !== baseTargets.length) {
         addAutopilotLog("Wall Street equities only: removed crypto symbols from scan targets.", "info");
       }
@@ -2863,8 +2885,9 @@ export default function MarketTerminal() {
           : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(2));
 
         const stat = autopilotMarketStatsRef.current[targetSymbol];
-        const hasStrongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
-        const strongTrend = !!stat && stat.trendStrength >= Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.6);
+        const directionalTrendThreshold = Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.6);
+        const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
+        const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
 
         if (hasPendingSeedBuy) {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
@@ -2882,9 +2905,9 @@ export default function MarketTerminal() {
             : (targetSymbol === "BTCUSD" ? 0.002 : 1);
 
           const hasStrongShortEdge = !!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS);
-          const strongDownTrend = !!stat && stat.trendStrength <= -Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.6);
+          const strongDownTrend = !!stat && stat.trendStrength <= -directionalTrendThreshold;
 
-          if (hasStrongEdge && strongTrend && seedQtyLong > 0) {
+          if (hasStrongLongEdge && strongUpTrend && seedQtyLong > 0) {
             // compute confidence and adapt sizing
             const sig = computeSignalConfidence(stat);
             const adjQty = computeAdaptiveQty(seedQtyLong, sig.confidence, targetSymbol);
