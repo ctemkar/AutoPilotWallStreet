@@ -102,7 +102,15 @@ export async function POST(req: Request) {
       );
     }
 
-    const accountRes = accountResult.value;
+    const accountRes = accountResult.status === "fulfilled" ? accountResult.value : undefined;
+    if (!accountRes) {
+      const reason = accountResult.reason instanceof Error ? accountResult.reason.message : String(accountResult.reason || "Unknown Alpaca account fetch failure");
+      return NextResponse.json(
+        { error: `Alpaca account request did not complete: ${reason}` },
+        { status: 200 }
+      );
+    }
+
     if (!accountRes.ok) {
       const errorText = await accountRes.text();
       const guidance = accountRes.status === 401
