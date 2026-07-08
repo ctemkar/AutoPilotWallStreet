@@ -1406,6 +1406,11 @@ export default function MarketTerminal() {
       addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
     } catch (err: any) {
       console.error(err);
+      setAlpacaAccount(null);
+      setAlpacaPositions([]);
+      setIsConnected(false);
+      setUseAlpacaLive(false);
+      localStorage.setItem("APCA_USE_ALPACA", "false");
       addLog(brokerType, "SYNC_ERROR", `Data stream refresh interrupted: ${err.message || err}`, "WARNING");
     } finally {
       setIsRefreshing(false);
@@ -4147,6 +4152,9 @@ export default function MarketTerminal() {
       if (!response.ok || rawData?.error) {
         throw new Error(rawData?.error || "Failed key validation.");
       }
+      if (!rawData?.account) {
+        throw new Error("No account data was returned by Alpaca.");
+      }
       setAlpacaAccount(rawData.account);
       setAlpacaPositions(await mergeBinanceSpotIntoPositions(rawData.positions || []));
       setIsConnected(true);
@@ -4169,6 +4177,8 @@ export default function MarketTerminal() {
       return true;
     } catch (err: any) {
       console.error(err);
+      setAlpacaAccount(null);
+      setAlpacaPositions([]);
       setIsConnected(false);
       setUseAlpacaLive(false);
       localStorage.setItem("APCA_USE_ALPACA", "false");
@@ -4179,6 +4189,12 @@ export default function MarketTerminal() {
       setIsConnecting(false);
     }
   };
+
+  useEffect(() => {
+    const shouldAutoReconnect = localStorage.getItem("APCA_USE_ALPACA") === "true";
+    if (!shouldAutoReconnect || isConnected || isConnecting) return;
+    void handleConnectAlpaca();
+  }, [apiKey, apiSecret, isPaper, isConnected, isConnecting]);
 
   const handleDisconnectAlpaca = () => {
     setIsConnected(false);
