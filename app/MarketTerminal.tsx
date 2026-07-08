@@ -5382,12 +5382,9 @@ if __name__ == "__main__":
             </button>
             <button
               id="switch-alpaca-pill"
-              onClick={() => {
-                if (apiKey && apiSecret) {
-                  handleConnectAlpaca();
-                } else {
-                  // Focus configuration inputs or alert
-                  showToast("Setup Required: Please insert Alpaca API Credentials first.", "WARNING");
+              onClick={async () => {
+                const connected = await handleConnectAlpaca();
+                if (!connected) {
                   document.getElementById("alpaca-config-card")?.scrollIntoView({ behavior: "smooth" });
                 }
               }}
