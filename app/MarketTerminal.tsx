@@ -2282,8 +2282,8 @@ export default function MarketTerminal() {
             "SUCCESS"
           );
         } else {
-          addAutopilotLog(`Automated Live Order ACCEPTED by broker (status: ${brokerStatus}, path: ${routeDescriptor}). Awaiting fill confirmation...`, "info");
-          addLog(symbolClean, `${side}_ACCEPTED`, `Live automated order accepted by broker (status: ${brokerStatus}, path: ${routeDescriptor}).`, "INFO");
+          addAutopilotLog(`Automated Live Order SUBMITTED to broker (status: ${brokerStatus}, path: ${routeDescriptor}). Waiting for Alpaca to confirm a fill before updating positions.`, "info");
+          addLog(symbolClean, `${side}_ACCEPTED`, `Live automated order submitted to broker (status: ${brokerStatus}, path: ${routeDescriptor}). Position not yet confirmed.`, "INFO");
         }
 
         if (isLossCloseAttempt && (isFilledStatus || brokerStatus === "ACCEPTED" || brokerStatus === "NEW" || brokerStatus === "PARTIALLY_FILLED")) {
@@ -2917,6 +2917,7 @@ export default function MarketTerminal() {
   }, [executeAutopilotOrder, addAutopilotLog, logScanOrderOutcome]);
 
   const autopilotRunningRef = useRef(false);
+  const autopilotCapPauseRef = useRef<string | null>(null);
 
   const executeAutopilotScan = useCallback(async () => {
     if (autopilotRunningRef.current) return;
@@ -2956,10 +2957,13 @@ export default function MarketTerminal() {
       const positionCapReached = maxOpenPositions > 0 && (currentOpenCounts.all + pendingBuyCount) >= maxOpenPositions;
 
       if (positionCapReached) {
+        autopilotCapPauseRef.current = `${currentOpenCounts.all}:${pendingBuyCount}`;
         addAutopilotLog(`Autopilot scan paused: position cap (${maxOpenPositions}) already reached (${currentOpenCounts.all} open + ${pendingBuyCount} pending).`, "info");
         setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
         return;
       }
+
+      autopilotCapPauseRef.current = null;
 
       const parsedTargets = (curRef.autopilotTargetTicker || DEFAULT_AUTOPILOT_TARGET_TICKERS)
         .split(/[\s,]+/)
@@ -3034,8 +3038,10 @@ export default function MarketTerminal() {
         const iterationRef = stateRef.current;
         const currentActivePositionsForIteration: Position[] = (iterationRef.useAlpacaLive ? iterationRef.alpacaPositions : iterationRef.mockPositions) || [];
         const livePositionsSnapshot = currentActivePositionsForIteration;
-        const capReachedBeforeTarget = shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", livePositionsSnapshot, autopilotPendingBuySymbolsRef.current.size);
+        const currentPending = autopilotPendingBuySymbolsRef.current.size;
+        const capReachedBeforeTarget = shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", livePositionsSnapshot, currentPending);
         if (capReachedBeforeTarget) {
+          autopilotCapPauseRef.current = `${computeOpenCounts(livePositionsSnapshot).all}:${currentPending}`;
           addAutopilotLog(`Autopilot scan paused: position cap (${maxOpenPositions}) already reached before evaluating ${targetSymbol}.`, "info");
           setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
           break;
@@ -3146,7 +3152,9 @@ export default function MarketTerminal() {
 
           if ((hasStrongLongEdge && strongUpTrend && seedQtyLong > 0) || shouldFallbackBuy) {
             const positionsSnapshot = (curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions) || [];
-            if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", positionsSnapshot, autopilotPendingBuySymbolsRef.current.size)) {
+            const pendingCountForEntry = autopilotPendingBuySymbolsRef.current.size;
+            if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", positionsSnapshot, pendingCountForEntry)) {
+              autopilotCapPauseRef.current = `${computeOpenCounts(positionsSnapshot).all}:${pendingCountForEntry}`;
               addAutopilotLog(`Skipping ${targetSymbol}: position cap (${maxOpenPositions}) already reached.`, "info");
               setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
               break;
@@ -3160,7 +3168,9 @@ export default function MarketTerminal() {
             logScanOrderOutcome("SCALPER", orderOutcome);
             if (orderOutcome.status === "BLOCKED" && orderOutcome.code === "BLOCKED_MAX_CONCURRENT") {
               const updatedPositions = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
-              if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", updatedPositions, autopilotPendingBuySymbolsRef.current.size)) {
+              const pendingCountAfterAttempt = autopilotPendingBuySymbolsRef.current.size;
+              if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", updatedPositions, pendingCountAfterAttempt)) {
+                autopilotCapPauseRef.current = `${computeOpenCounts(updatedPositions).all}:${pendingCountAfterAttempt}`;
                 addAutopilotLog(`Autopilot scan stopped: position cap (${maxOpenPositions}) reached after the latest order attempt.`, "info");
                 setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
                 break;
@@ -4607,11 +4617,14 @@ export default function MarketTerminal() {
         const brokerStatus = String(dataOrder.status || "ACCEPTED").toUpperCase();
         const filledQty = Number.parseFloat(String(dataOrder.filled_qty ?? "0"));
         const isFilledStatus = brokerStatus === "FILLED" || brokerStatus === "PARTIALLY_FILLED";
+        const isQueuedStatus = brokerStatus === "ACCEPTED" || brokerStatus === "NEW" || brokerStatus === "PENDING_NEW" || brokerStatus === "PENDING";
         const successMessage = isFilledStatus
           ? `Live market order filled for ${orderUnit === "USD" ? `${inputVal}` : `${filledQty > 0 ? filledQty : targetQtyNum} share(s)`} of ${symbolClean}.`
-          : `Order accepted by Alpaca and queued for fill. Status: ${brokerStatus}.`;
+          : isQueuedStatus
+            ? `Order submitted to Alpaca and queued for fill. Status: ${brokerStatus}. No position is confirmed until Alpaca reports a fill.`
+            : `Order status is ${brokerStatus}. No position is confirmed until the order fills.`;
 
-        setOrderSuccess(`Successfully queued! Order ID: ${dataOrder.id || "Submitted"}. ${successMessage}`);
+        setOrderSuccess(`Order submitted. ID: ${dataOrder.id || "Submitted"}. ${successMessage}`);
         addLog(
           symbolClean,
           isFilledStatus ? `${side}_FILLED` : `${side}_ACCEPTED`,
