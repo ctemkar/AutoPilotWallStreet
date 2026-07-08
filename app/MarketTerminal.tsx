@@ -4197,10 +4197,14 @@ export default function MarketTerminal() {
   };
 
   useEffect(() => {
-    const shouldAutoReconnect = localStorage.getItem("APCA_USE_ALPACA") === "true";
-    if (!shouldAutoReconnect || isConnected || isConnecting) return;
-    void handleConnectAlpaca();
-  }, [apiKey, apiSecret, isPaper, isConnected, isConnecting]);
+    if (isConnected || isConnecting) return;
+
+    const timer = window.setTimeout(() => {
+      void handleConnectAlpaca();
+    }, 600);
+
+    return () => window.clearTimeout(timer);
+  }, [isConnected, isConnecting]);
 
   const handleDisconnectAlpaca = () => {
     setIsConnected(false);
@@ -4247,9 +4251,11 @@ export default function MarketTerminal() {
     }
   };
 
+  const liveAccountReady = Boolean(alpacaAccount && (isConnected || useAlpacaLive));
+
   // Calculations for current active mode
-  const activePositions = useAlpacaLive ? alpacaPositions : mockPositions;
-  const activeCash = useAlpacaLive
+  const activePositions = liveAccountReady ? alpacaPositions : mockPositions;
+  const activeCash = liveAccountReady
     ? parseFloat(alpacaAccount?.cash || 0)
     : simCash;
 
@@ -4260,8 +4266,8 @@ export default function MarketTerminal() {
   );
 
   const totalEquity = activeCash + totalMarketValue;
-  const netProfit = useAlpacaLive ? 0 : totalEquity - startingCapital;
-  const roiPercent = useAlpacaLive ? 0 : (startingCapital > 0 ? (netProfit / startingCapital) * 100 : 0);
+  const netProfit = liveAccountReady ? 0 : totalEquity - startingCapital;
+  const roiPercent = liveAccountReady ? 0 : (startingCapital > 0 ? (netProfit / startingCapital) * 100 : 0);
   // Percent of cash used by portfolio: positions value / (cash + positions)
   const percentCashUsed = totalEquity > 0 ? (totalMarketValue / totalEquity) * 100 : 0;
   
@@ -5568,10 +5574,10 @@ if __name__ == "__main__":
           <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-net-profit">
             <TrendingUp className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
             <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono text-purple-400">
-              {useAlpacaLive ? "Live Day P&L" : "Sandbox Net Profit"}
+              {liveAccountReady ? "Live Day P&L" : "Sandbox Net Profit"}
             </span>
             
-            {useAlpacaLive ? (
+            {liveAccountReady ? (
               <>
                 {(() => {
                   const dayChange = parseFloat(alpacaAccount?.equity || 0) - parseFloat(alpacaAccount?.last_equity || alpacaAccount?.equity || 0);
@@ -5630,7 +5636,7 @@ if __name__ == "__main__":
               <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider font-mono">
                 Ready Cash Balance
               </span>
-              {!useAlpacaLive && !isEditingCash && (
+              {!liveAccountReady && !isEditingCash && (
                 <button
                   type="button"
                   onClick={() => {
@@ -5746,15 +5752,15 @@ if __name__ == "__main__":
               Alpaca Reg-T Buying Power
             </span>
             <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="buying-power-number">
-              ${(useAlpacaLive ? parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || 0) : activeCash * simLeverageLimit).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              ${(liveAccountReady ? parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || 0) : activeCash * simLeverageLimit).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
             <div className="text-xs text-gray-400 mt-1.5 font-mono" id="stat-buying-power-description">
-              {useAlpacaLive
+              {liveAccountReady
                 ? `General buying power: $${parseFloat(alpacaAccount?.buying_power || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                 : `${simLeverageLimit}x mechanical ratio limit`}
             </div>
             <div className="text-xs text-purple-400 mt-1.5 flex items-center gap-1 font-mono" id="stat-buying-power-limit">
-              <span>{useAlpacaLive ? "Live Alpaca Reg-T order limit" : "Simulator leverage limit"}</span>
+              <span>{liveAccountReady ? "Live Alpaca Reg-T order limit" : "Simulator leverage limit"}</span>
             </div>
           </div>
 
