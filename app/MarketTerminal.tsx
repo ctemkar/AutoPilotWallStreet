@@ -290,6 +290,8 @@ function getMarketSessionET(): "OPEN" | "EXTENDED" | "CLOSED" {
   return "CLOSED";
 }
 
+const HYDRATION_SAFE_TIME_PLACEHOLDER = "--:--";
+
 export default function MarketTerminal() {
   // Broker selection fixed to Alpaca US market only
   const brokerType = "ALPACA" as const;
@@ -522,7 +524,7 @@ export default function MarketTerminal() {
     ) => {
       const newLog: Log = {
         id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: typeof window === "undefined" ? HYDRATION_SAFE_TIME_PLACEHOLDER : new Date().toLocaleTimeString(),
         symbol,
         action,
         message,
@@ -677,7 +679,7 @@ export default function MarketTerminal() {
       }
       const newLog = {
         id: `ap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-        time: new Date().toLocaleTimeString(),
+        time: typeof window === "undefined" ? HYDRATION_SAFE_TIME_PLACEHOLDER : new Date().toLocaleTimeString(),
         msg,
         type
       };
@@ -742,12 +744,16 @@ export default function MarketTerminal() {
       }
       if (maxExposureStored) {
         const n = parseFloat(maxExposureStored);
-        if (Number.isFinite(n)) setMaxExposurePercentPerSymbol(Math.max(1, Math.min(100, n)));
+        if (Number.isFinite(n)) {
+          setMaxExposurePercentPerSymbol(Math.max(1, Math.min(100, n)));
+        }
       }
       if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
       if (maxConcurrentStored !== null && maxConcurrentStored !== false) {
-        const val = parseInt(maxConcurrentStored as string);
-        if (Number.isFinite(val)) setMaxConcurrentPositions(Math.max(1, val));
+        const val = parseInt(maxConcurrentStored as string, 10);
+        if (Number.isFinite(val)) {
+          setMaxConcurrentPositions(Math.max(1, val));
+        }
       }
       const autoLiquidateStored = typeof window !== "undefined" && localStorage.getItem("sentry:autoLiquidateBeforeClose");
       const liquidationMinStored = typeof window !== "undefined" && localStorage.getItem("sentry:liquidationBeforeCloseMin");
@@ -930,7 +936,7 @@ export default function MarketTerminal() {
   const [autopilotLogs, setAutopilotLogs] = useState<{ id: string; time: string; msg: string; type: "info" | "success" | "warn" | "trade" }[]>([
     {
       id: "init",
-      time: new Date().toLocaleTimeString(),
+      time: HYDRATION_SAFE_TIME_PLACEHOLDER,
       msg: "System load successful. Autopilot engine initialized offline. Configure credentials or select simulated asset.",
       type: "info"
     }
@@ -2916,6 +2922,14 @@ export default function MarketTerminal() {
 
       const currentOpenCounts = computeOpenCounts(currentActivePositions);
       const maxOpenPositions = curRef.maxConcurrentPositions || 999;
+      const pendingBuyCount = autopilotPendingBuySymbolsRef.current.size;
+      const positionCapReached = maxOpenPositions > 0 && (currentOpenCounts.all + pendingBuyCount) >= maxOpenPositions;
+
+      if (positionCapReached) {
+        addAutopilotLog(`Autopilot scan paused: position cap (${maxOpenPositions}) already reached (${currentOpenCounts.all} open + ${pendingBuyCount} pending).`, "info");
+        setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
+        return;
+      }
 
       const parsedTargets = (curRef.autopilotTargetTicker || DEFAULT_AUTOPILOT_TARGET_TICKERS)
         .split(/[\s,]+/)
@@ -2967,7 +2981,6 @@ export default function MarketTerminal() {
       setAutopilotScanError(null);
       setAutopilotScanErrorCount(0);
 
-      const pendingBuyCount = autopilotPendingBuySymbolsRef.current.size;
       const maxPendingBuyThreshold = 10;
       if (pendingBuyCount >= maxPendingBuyThreshold) {
         addAutopilotLog(`Paused autopilot scan: ${pendingBuyCount} pending broker buy confirmations remain. Waiting for fills before new entries.`, "warn");
@@ -4083,7 +4096,7 @@ export default function MarketTerminal() {
     if (savedApiSecret) setApiSecret(savedApiSecret);
     if (savedIsPaper !== null) setIsPaper(savedIsPaper);
 
-    const ts = new Date().toLocaleTimeString();
+    const ts = HYDRATION_SAFE_TIME_PLACEHOLDER;
 
     const initApp = async () => {
       let effectiveIsPaper = savedIsPaper === null ? true : savedIsPaper;
@@ -4408,7 +4421,7 @@ export default function MarketTerminal() {
     if (isCryptoSymbol(symbolClean)) {
       setIsPlacingOrder(false);
       setOrderError("Only Wall Street equities are supported in this terminal.");
-      addLog(symbolClean, `${side}_BLOCKED`, "Crypto trading is disabled in this terminal app.", "WARNING");
+      addLog(symbolClean, `${side}_BLOCKED`, "Only US equities are supported in this terminal app.", "WARNING");
       return;
     }
 
@@ -4442,7 +4455,7 @@ export default function MarketTerminal() {
       if (isCrypto) {
         setIsPlacingOrder(false);
         setOrderError("Only Wall Street equities are supported in this terminal.");
-        addLog(symbolClean, "AUTO_BUY_BLOCKED", "Crypto trading is disabled in this terminal app.", "WARNING");
+        addLog(symbolClean, "AUTO_BUY_BLOCKED", "Only US equities are supported in this terminal app.", "WARNING");
         return;
       }
 
@@ -4829,7 +4842,7 @@ export default function MarketTerminal() {
       setAutopilotLogs([
         {
           id: "init",
-          time: new Date().toLocaleTimeString(),
+          time: HYDRATION_SAFE_TIME_PLACEHOLDER,
           msg: "System load successful. Autopilot engine initialized completely clean.",
           type: "info"
         }
@@ -5295,7 +5308,7 @@ if __name__ == "__main__":
       {/* Auto-switch control */}
       <div className="mt-4 mb-4 flex items-center gap-3">
         <div className="rounded-lg border border-brand-border/60 bg-brand-bg/50 px-4 py-3 text-xs text-gray-300 font-mono">
-          Crypto trading is disabled in this terminal app. Autopilot will not switch into a crypto-only strategy.
+          US equities only in this terminal app. Autopilot will trade stocks and ETFs on the live Alpaca account.
         </div>
       </div>
       <div className="mb-4 flex items-center gap-3">
