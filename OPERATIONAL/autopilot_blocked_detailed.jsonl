@@ -10621,3 +10621,5 @@
 {"timestamp":1783529430800,"outcome":{"status":"BLOCKED","code":"BLOCKED_MAX_CONCURRENT","symbol":"TSLA","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Concurrent position limit (4) reached."},"stats":null}
 {"timestamp":1783529476710,"outcome":{"status":"BLOCKED","code":"BLOCKED_MAX_CONCURRENT","symbol":"TSLA","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Concurrent position limit (4) reached."},"stats":null}
 {"timestamp":1783529476710,"outcome":{"status":"BLOCKED","code":"BLOCKED_MAX_CONCURRENT","symbol":"TSLA","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Concurrent position limit (4) reached."},"stats":null}
+{"timestamp":1783529522651,"outcome":{"status":"BLOCKED","code":"BLOCKED_MAX_CONCURRENT","symbol":"TSLA","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Concurrent position limit (4) reached."},"stats":null}
+{"timestamp":1783529522652,"outcome":{"status":"BLOCKED","code":"BLOCKED_MAX_CONCURRENT","symbol":"TSLA","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Concurrent position limit (4) reached."},"stats":null}
