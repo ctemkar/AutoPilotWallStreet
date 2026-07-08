@@ -249,11 +249,42 @@ class AsyncMutex {
   }
 }
 
+function getNewYorkDateParts(now = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(now);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const year = Number(values.year);
+  const month = Number(values.month);
+  const day = Number(values.day);
+  const hour = Number(values.hour);
+  const minute = Number(values.minute);
+  const second = Number(values.second);
+  const utcDate = Date.UTC(year, month - 1, day, hour, minute, second);
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    dayOfWeek: new Date(utcDate).getUTCDay(),
+  };
+}
+
 function getMarketSessionET(): "OPEN" | "EXTENDED" | "CLOSED" {
-  const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-  const day = et.getDay();
+  const et = getNewYorkDateParts();
+  const day = et.dayOfWeek;
   if (day === 0 || day === 6) return "CLOSED";
-  const mins = et.getHours() * 60 + et.getMinutes();
+  const mins = et.hour * 60 + et.minute;
   if (mins >= 570 && mins < 960) return "OPEN";           // 9:30–16:00
   if ((mins >= 240 && mins < 570) || (mins >= 960 && mins < 1200)) return "EXTENDED"; // 4:00–9:30, 16:00–20:00
   return "CLOSED";
@@ -1181,10 +1212,10 @@ export default function MarketTerminal() {
   }, []);
 
   const getEtDayKey = useCallback(() => {
-    const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-    const yyyy = et.getFullYear();
-    const mm = String(et.getMonth() + 1).padStart(2, "0");
-    const dd = String(et.getDate()).padStart(2, "0");
+    const et = getNewYorkDateParts();
+    const yyyy = et.year;
+    const mm = String(et.month).padStart(2, "0");
+    const dd = String(et.day).padStart(2, "0");
     return `${yyyy}-${mm}-${dd}`;
   }, []);
 
@@ -4259,13 +4290,13 @@ export default function MarketTerminal() {
       if (!curRef.useAlpacaLive) return; // only run in live mode
       if (!autoLiquidateBeforeClose) return;
       // compute ET time
-      const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-      const day = et.getDay();
+      const et = getNewYorkDateParts();
+      const day = et.dayOfWeek;
       if (day === 0 || day === 6) return; // weekend
-      const minsNow = et.getHours() * 60 + et.getMinutes();
+      const minsNow = et.hour * 60 + et.minute;
       const marketCloseMins = 16 * 60; // 16:00 ET
       const minsToClose = marketCloseMins - minsNow;
-      const todayKey = et.toISOString().slice(0,10);
+      const todayKey = `${et.year}-${String(et.month).padStart(2, "0")}-${String(et.day).padStart(2, "0")}`;
       if (minsToClose <= liquidationBeforeCloseMin && minsToClose >= 0) {
         if (lastAutoLiquidationDayRef.current === todayKey) return; // already ran today
         lastAutoLiquidationDayRef.current = todayKey;

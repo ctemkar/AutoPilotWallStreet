@@ -102,11 +102,19 @@ export async function POST(req: Request) {
       );
     }
 
-    const accountRes = accountResult.status === "fulfilled" ? accountResult.value : undefined;
-    if (!accountRes) {
-      const reason = accountResult.reason instanceof Error ? accountResult.reason.message : String(accountResult.reason || "Unknown Alpaca account fetch failure");
+    const accountOutcome = accountResult as PromiseSettledResult<Response>;
+    const accountRes = accountOutcome.status === "fulfilled" ? accountOutcome.value : undefined;
+    if (accountOutcome.status === "rejected") {
+      const reason = accountOutcome.reason instanceof Error ? accountOutcome.reason.message : String(accountOutcome.reason || "Unknown Alpaca account fetch failure");
       return NextResponse.json(
         { error: `Alpaca account request did not complete: ${reason}` },
+        { status: 200 }
+      );
+    }
+
+    if (!accountRes) {
+      return NextResponse.json(
+        { error: "Alpaca account request completed without a response body." },
         { status: 200 }
       );
     }
@@ -127,10 +135,10 @@ export async function POST(req: Request) {
     let positionsData: any[] = [];
     if (positionsResult.status === "fulfilled") {
       const positionsRes = positionsResult.value;
-      if (positionsRes.ok) {
+      if (positionsRes?.ok) {
         positionsData = await positionsRes.json();
       } else {
-        console.warn("Alpaca positions fetch failed:", positionsRes.status, positionsRes.statusText);
+        console.warn("Alpaca positions fetch failed:", positionsRes?.status, positionsRes?.statusText);
       }
     } else {
       console.warn("Alpaca positions fetch error:", positionsResult.reason?.message || positionsResult.reason);
