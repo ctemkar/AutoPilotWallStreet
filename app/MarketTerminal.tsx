@@ -29,6 +29,9 @@ import {
 } from "lucide-react";
 
 // Types
+const LIVE_SYNC_INTERVAL_MS = 180000; // 3 minutes
+const LIVE_SYNC_PENDING_ORDER_REFRESH_MS = 30000; // 30 seconds after a pending order shows up
+
 interface Position {
   symbol: string;
   qty: number;
@@ -1404,7 +1407,7 @@ export default function MarketTerminal() {
   }, []);
 
   // Refresh data proxy
-  const handleRefreshData = useCallback(async () => {
+  const handleRefreshData = useCallback(async (options?: { silent?: boolean }) => {
     if (!useAlpacaLive) return;
     setIsRefreshing(true);
     try {
@@ -1467,15 +1470,17 @@ export default function MarketTerminal() {
           };
         });
       }
-      const cashValue = parseFloat(alpacaAccount?.cash || "0");
-      const equityValue = parseFloat(alpacaAccount?.equity || alpacaAccount?.portfolio_value || "0");
-      const buyingPowerValue = parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || "0");
-      addLog(
-        "ALPACA",
-        "SYNC",
-        `Real-time positions and balances successfully synced. Cash: $${cashValue.toFixed(2)} | Equity: $${equityValue.toFixed(2)} | Buying Power: $${buyingPowerValue.toFixed(2)}`,
-        "SUCCESS"
-      );
+      if (!options?.silent) {
+        const cashValue = parseFloat(alpacaAccount?.cash || "0");
+        const equityValue = parseFloat(alpacaAccount?.equity || alpacaAccount?.portfolio_value || "0");
+        const buyingPowerValue = parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || "0");
+        addLog(
+          "ALPACA",
+          "SYNC",
+          `Real-time positions and balances successfully synced. Cash: $${cashValue.toFixed(2)} | Equity: $${equityValue.toFixed(2)} | Buying Power: $${buyingPowerValue.toFixed(2)}`,
+          "SUCCESS"
+        );
+      }
     } catch (err: any) {
       console.error(err);
       if (!alpacaAccount) {
@@ -4124,15 +4129,15 @@ export default function MarketTerminal() {
   useEffect(() => {
     if (!useAlpacaLive) return;
     if (lastAutopilotOrderOutcome?.status !== "PENDING") return;
-    const intervalId = setInterval(() => {
-      handleRefreshData();
-    }, 5000);
-    const timeoutId = setTimeout(() => {
-      clearInterval(intervalId);
-    }, 60000);
+
+    const refreshPendingOrderState = () => {
+      void handleRefreshData({ silent: true });
+    };
+
+    refreshPendingOrderState();
+    const timeoutId = setTimeout(refreshPendingOrderState, LIVE_SYNC_PENDING_ORDER_REFRESH_MS);
 
     return () => {
-      clearInterval(intervalId);
       clearTimeout(timeoutId);
     };
   }, [useAlpacaLive, lastAutopilotOrderOutcome, handleRefreshData]);
@@ -4140,8 +4145,8 @@ export default function MarketTerminal() {
   useEffect(() => {
     if (!useAlpacaLive) return;
     const intervalId = setInterval(() => {
-      handleRefreshData();
-    }, 45000);
+      void handleRefreshData({ silent: true });
+    }, LIVE_SYNC_INTERVAL_MS);
     return () => clearInterval(intervalId);
   }, [useAlpacaLive, handleRefreshData]);
 

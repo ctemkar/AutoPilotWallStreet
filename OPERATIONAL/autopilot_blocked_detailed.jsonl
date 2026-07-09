@@ -12683,3 +12683,7 @@
 {"timestamp":1783542737529,"outcome":{"status":"BLOCKED","code":"BLOCKED_EXPOSURE_CAP","symbol":"AAPL","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Post-order exposure 150.00% exceeds cap 40%."},"stats":null}
 {"timestamp":1783544341829,"outcome":{"status":"BLOCKED","code":"BLOCKED_EXPOSURE_CAP","symbol":"AAPL","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Post-order exposure 150.00% exceeds cap 40%."},"stats":null}
 {"timestamp":1783544341830,"outcome":{"status":"BLOCKED","code":"BLOCKED_EXPOSURE_CAP","symbol":"AAPL","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Post-order exposure 150.00% exceeds cap 40%."},"stats":null}
+{"timestamp":1783599755072,"outcome":{"status":"BLOCKED","code":"BLOCKED_EXPOSURE_CAP","symbol":"AAPL","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Post-order exposure 150.00% exceeds cap 40%."},"stats":null}
+{"timestamp":1783599755072,"outcome":{"status":"BLOCKED","code":"BLOCKED_EXPOSURE_CAP","symbol":"AAPL","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Post-order exposure 150.00% exceeds cap 40%."},"stats":null}
+{"timestamp":1783599755401,"outcome":{"status":"BLOCKED","code":"BLOCKED_EXPOSURE_CAP","symbol":"AAPL","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Post-order exposure 150.00% exceeds cap 40%."},"stats":null}
+{"timestamp":1783599755402,"outcome":{"status":"BLOCKED","code":"BLOCKED_EXPOSURE_CAP","symbol":"AAPL","side":"BUY","requestedQty":0.01,"executedQty":0,"message":"Post-order exposure 150.00% exceeds cap 40%."},"stats":null}
