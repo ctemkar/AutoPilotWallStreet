@@ -298,11 +298,12 @@ export default function MarketTerminal() {
 
   // Market-hours tracking
   const [marketSession, setMarketSession] = useState<"OPEN" | "EXTENDED" | "CLOSED">(getMarketSessionET);
+  const lastSessionCleanupKeyRef = useRef<string>("");
   useEffect(() => {
     const timer = setInterval(() => setMarketSession(getMarketSessionET()), 30000);
     return () => clearInterval(timer);
   }, []);
-  
+
   // Toast for short-term action summaries
   const [toast, setToast] = useState<{ message: string; level?: "info" | "success" | "warn" | "error" } | null>(null);
 
@@ -370,6 +371,57 @@ export default function MarketTerminal() {
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
 
+  const cancelUnresolvedBrokerOrders = useCallback(async () => {
+    if (!useAlpacaLive || !isConnected || !apiKey || !apiSecret) return;
+
+    const sessionKey = `${new Date().toISOString().slice(0, 10)}:${marketSession}`;
+    if (lastSessionCleanupKeyRef.current === sessionKey) return;
+    lastSessionCleanupKeyRef.current = sessionKey;
+
+    try {
+      const response = await fetch("/api/alpaca/order-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          isPaper,
+          orderId: "__all__",
+          apiKey,
+          apiSecret,
+        }),
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.error) return;
+
+      const openOrders = Array.isArray(payload?.orders) ? payload.orders : [];
+      const unresolved = openOrders.filter((order: any) => {
+        const status = String(order?.status || "").toUpperCase();
+        return ["NEW", "PENDING_NEW", "PENDING", "PARTIALLY_FILLED", "ACCEPTED"].includes(status);
+      });
+
+      if (unresolved.length === 0) {
+        addLog("ALPACA", "SESSION_CLEANUP", "No unresolved broker orders found to cancel at session close.", "INFO");
+        return;
+      }
+
+      for (const order of unresolved) {
+        const orderId = String(order?.id || "").trim();
+        if (!orderId) continue;
+        await fetch("/api/alpaca/order-cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isPaper, orderId, apiKey, apiSecret }),
+        });
+      }
+
+      addLog("ALPACA", "SESSION_CLEANUP", `Cancelled ${unresolved.length} unresolved broker order(s) at session close.`, "WARNING");
+      await handleRefreshData();
+    } catch (error: any) {
+      console.error("Session cleanup failed", error);
+      addLog("ALPACA", "SESSION_CLEANUP_ERROR", error?.message || "Failed to cancel unresolved broker orders.", "WARNING");
+    }
+  }, [apiKey, apiSecret, isConnected, isPaper, marketSession, useAlpacaLive]);
+
   // Connection & loading flags
   const [isConnecting, setIsConnecting] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
@@ -378,6 +430,12 @@ export default function MarketTerminal() {
   const [orderError, setOrderError] = useState("");
   const [orderSuccess, setOrderSuccess] = useState("");
   const [, setBinancePreferredUsdt] = useState<number>(0);
+
+  useEffect(() => {
+    if (!useAlpacaLive || !isConnected || !apiKey || !apiSecret) return;
+    if (marketSession !== "CLOSED") return;
+    void cancelUnresolvedBrokerOrders();
+  }, [apiKey, apiSecret, cancelUnresolvedBrokerOrders, isConnected, marketSession, useAlpacaLive]);
   const [, setBinanceFundingSource] = useState<"futures" | "spot" | "none">("none");
   const [, setBinanceFundingUpdatedAt] = useState<number | null>(null);
 
@@ -1409,7 +1467,15 @@ export default function MarketTerminal() {
           };
         });
       }
-      addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
+      const cashValue = parseFloat(alpacaAccount?.cash || "0");
+      const equityValue = parseFloat(alpacaAccount?.equity || alpacaAccount?.portfolio_value || "0");
+      const buyingPowerValue = parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || "0");
+      addLog(
+        "ALPACA",
+        "SYNC",
+        `Real-time positions and balances successfully synced. Cash: $${cashValue.toFixed(2)} | Equity: $${equityValue.toFixed(2)} | Buying Power: $${buyingPowerValue.toFixed(2)}`,
+        "SUCCESS"
+      );
     } catch (err: any) {
       console.error(err);
       if (!alpacaAccount) {
@@ -5628,6 +5694,20 @@ if __name__ == "__main__":
                         <div className="text-xs text-gray-400">ALPACA AUTH</div>
                         <div className="text-green-400 font-semibold">{alpacaAuthText}</div>
                       </div>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 border-t border-white/10 pt-3" id="live-balance-strip">
+                    <div className="rounded-lg bg-black/20 px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-wide text-gray-400">Cash</div>
+                      <div className="text-sm font-semibold text-white">${parseFloat(alpacaAccount?.cash || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    </div>
+                    <div className="rounded-lg bg-black/20 px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-wide text-gray-400">Equity</div>
+                      <div className="text-sm font-semibold text-brand-green">${parseFloat(alpacaAccount?.equity || alpacaAccount?.portfolio_value || alpacaAccount?.cash || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    </div>
+                    <div className="rounded-lg bg-black/20 px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-wide text-gray-400">Buying Power</div>
+                      <div className="text-sm font-semibold text-violet-400">${parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     </div>
                   </div>
                 </div>

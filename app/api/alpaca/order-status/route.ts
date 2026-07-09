@@ -52,6 +52,32 @@ export async function POST(req: Request) {
       "User-Agent": "Alpaca-Margin-Terminal/1.0",
     };
 
+    if (orderId === "__all__") {
+      const orderRes = await fetchWithTimeout(`${baseUrl}/v2/orders?status=open`, {
+        method: "GET",
+        headers,
+        cache: "no-store",
+      });
+
+      if (!orderRes.ok) {
+        const errorText = await orderRes.text();
+        return NextResponse.json({ error: `Alpaca open orders rejected: ${errorText || orderRes.statusText}` }, { status: 200 });
+      }
+
+      const orders = await orderRes.json();
+      return NextResponse.json({
+        orders: Array.isArray(orders) ? orders.map((order: any) => ({
+          id: order.id,
+          symbol: order.symbol,
+          status: String(order.status || "").toUpperCase(),
+          filled_qty: Number.parseFloat(String(order.filled_qty ?? "0")),
+          filled_avg_price: Number.parseFloat(String(order.filled_avg_price ?? "0")),
+          side: String(order.side || "").toUpperCase(),
+          raw: order,
+        })) : [],
+      });
+    }
+
     const orderRes = await fetchWithTimeout(`${baseUrl}/v2/orders/${encodeURIComponent(orderId)}`, {
       method: "GET",
       headers,
