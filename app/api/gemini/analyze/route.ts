@@ -64,7 +64,7 @@ export async function POST(req: Request) {
       ? positions.map((p: any) => `- **${p.symbol}**: Qty ${p.qty} | Current Price $${p.current_price} | Entry Price $${p.avg_entry_price} | Market Value $${p.market_value?.toFixed(2) || (p.qty * p.current_price).toFixed(2)}`).join("\n")
       : "No active holdings (fully liquid in Cash).";
 
-    const prompt = `Perform a professional portfolio risk and margin stress-test diagnostic on a trader's account.
+    const prompt = `You are a senior portfolio risk analyst. Produce a concise but high-signal diagnostic for this account.
 
 Account Details:
 - Portfolio Total Equity: $${equity}
@@ -74,7 +74,14 @@ Account Details:
 - Active Positions:
 ${activePositionsStr}
 
-Please generate an interactive portfolio health diagnosis. Structurally evaluate what occurs under standard downside shock scenarios (-10%, -20%, and -30% market-wide crashes). Highlight which positions represent high risk or large margin burden under volatile conditions. Provide list of actionable advice (mitigation steps) to safeguard the account from sudden liquidation margin calls. Keep your tone professional, concise, and direct.`;
+Requirements:
+1. Start with a one-line overall risk verdict.
+2. Provide a compact stress-test matrix for -10%, -20%, and -30% market shocks.
+3. Identify the top 3 risk drivers and explain why they matter.
+4. Flag any concentration, margin, or liquidity issues explicitly.
+5. End with 3 concrete mitigation actions the trader should take immediately.
+6. Keep the tone professional, practical, and direct.
+7. Do not mention that you are an AI or use generic filler. Use precise language and numbers where possible.`;
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
