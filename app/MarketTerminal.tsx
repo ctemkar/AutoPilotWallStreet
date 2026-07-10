@@ -1084,8 +1084,8 @@ export default function MarketTerminal() {
   // --- Adaptive sizing controller ---
   const computeAdaptiveQty = useCallback((baseQty: number, confidence: number, symbol?: string) => {
     const minQty = symbol === "BTCUSD" ? 0.0001 : 0.01;
-    // Scale between 70% and 100% of baseQty depending on confidence (less aggressive downscaling)
-    const scale = 0.7 + 0.3 * Math.max(0, Math.min(1, confidence));
+    // Keep sizing close to the target allocation even on moderate-confidence setups.
+    const scale = 0.9 + 0.1 * Math.max(0, Math.min(1, confidence));
     const raw = Math.max(minQty, baseQty * scale);
     // Round appropriately for BTC vs equities
     return symbol === "BTCUSD" ? parseFloat(raw.toFixed(4)) : parseFloat(raw.toFixed(2));
@@ -1302,8 +1302,8 @@ export default function MarketTerminal() {
     const cashValue = isAlpaca ? parseFloat(curRef.alpacaAccount?.cash || "0") : parseFloat(curRef.simCash as any || 0);
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
-    const exposureCap = Math.min(Math.max(30, curRef.maxExposurePercentPerSymbol || 40), 60);
-    const baseExposurePct = isAlpaca ? 45 : 28;
+    const exposureCap = Math.min(70, Math.max(60, curRef.maxExposurePercentPerSymbol || 70));
+    const baseExposurePct = 70;
     let exposurePct = baseExposurePct;
 
     if (stats) {
@@ -1322,11 +1322,11 @@ export default function MarketTerminal() {
     const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
     const maxQty = isAlpaca
       ? symbol === "BTCUSD"
-        ? 0.01
-        : 20
+        ? 0.05
+        : 500
       : symbol === "BTCUSD"
-        ? 0.003
-        : 6;
+        ? 0.01
+        : 200;
     let qty = Math.max(minQty, qtyFromExposure);
     qty = Math.min(qty, maxQty);
 
@@ -3188,7 +3188,7 @@ export default function MarketTerminal() {
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
         const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
         const liveBudget = isLiveMode
-          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.25)
+          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.7)
           : 0;
         const liveMinQty = Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
