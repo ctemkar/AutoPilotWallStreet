@@ -713,7 +713,7 @@ export default function MarketTerminal() {
 
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(40); // percent of portfolio per symbol
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(70); // percent of portfolio per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(4); // concurrent open positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
@@ -806,7 +806,7 @@ export default function MarketTerminal() {
       if (maxExposureStored) {
         const n = parseFloat(maxExposureStored);
         if (Number.isFinite(n)) {
-          setMaxExposurePercentPerSymbol(Math.max(1, Math.min(100, n)));
+          setMaxExposurePercentPerSymbol(Math.max(60, Math.min(70, n)));
         }
       }
       if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
@@ -1302,7 +1302,7 @@ export default function MarketTerminal() {
     const cashValue = isAlpaca ? parseFloat(curRef.alpacaAccount?.cash || "0") : parseFloat(curRef.simCash as any || 0);
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
-    const exposureCap = Math.min(70, Math.max(60, curRef.maxExposurePercentPerSymbol || 70));
+    const exposureCap = Math.min(70, Math.max(60, Number(curRef.maxExposurePercentPerSymbol) || 70));
     const baseExposurePct = 70;
     let exposurePct = baseExposurePct;
 
@@ -1887,8 +1887,9 @@ export default function MarketTerminal() {
       const intendedValue = Math.abs(qtyNum) * guessPrice;
       const newExposurePct = ((currentPosVal + intendedValue) / totalPortfolio) * 100;
 
-      if (side === "BUY" && (newExposurePct > (curRef.maxExposurePercentPerSymbol || 100))) {
-        const capPct = curRef.maxExposurePercentPerSymbol || 100;
+      const effectiveExposureCap = Math.min(70, Math.max(60, Number(curRef.maxExposurePercentPerSymbol) || 70));
+      if (side === "BUY" && (newExposurePct > effectiveExposureCap)) {
+        const capPct = effectiveExposureCap;
         const maxAdditionalValue = (totalPortfolio * (capPct / 100)) - currentPosVal;
         const minExecutableQty = Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01);
 
@@ -1982,12 +1983,9 @@ export default function MarketTerminal() {
           const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
           const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
           const isFractional = qtyNum % 1 !== 0;
-          // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
-          const maxAllowedPower = (cashValue < 2000 || isFractional)
-            ? cashValue
-            : Math.min(rawBuyingPower, cashValue * 2);
+          const maxAllowedPower = Math.max(0, Math.min(rawBuyingPower, cashValue * 4));
           const effectiveAllowedPower = Math.max(0, maxAllowedPower);
-          const maxSafeOrderVal = effectiveAllowedPower * 0.96; // enforce a smaller safety collar for fractional buy orders
+          const maxSafeOrderVal = effectiveAllowedPower;
 
           if (effectiveAllowedPower <= 0) {
             addAutopilotLog(`Blocked live automated BUY: account buying power is unavailable or negative (${maxAllowedPower.toFixed(2)}).`, "warn");
@@ -7042,7 +7040,7 @@ if __name__ == "__main__":
                         min={0}
                         step={0.1}
                         value={maxExposurePercentPerSymbol}
-                        onChange={(e) => setMaxExposurePercentPerSymbol(Number.isFinite(parseFloat(e.target.value)) ? Math.max(0, parseFloat(e.target.value)) : 0)}
+                        onChange={(e) => setMaxExposurePercentPerSymbol(Number.isFinite(parseFloat(e.target.value)) ? Math.max(60, parseFloat(e.target.value)) : 60)}
                         className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
                       />
                       <p className="text-[9px] text-gray-500 mt-1">Cap percent allocation per symbol.</p>
