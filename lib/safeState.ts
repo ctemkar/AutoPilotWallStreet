@@ -23,7 +23,7 @@ export class SafeStateManager {
           if (parsed && parsed.active) {
             this._isSafe = true;
             this._reason = parsed.reason || "restored";
-            this.callbacks.onChange?.(true, this._reason);
+            this.callbacks.onChange?.(true, this._reason || undefined);
           }
         }
       }
