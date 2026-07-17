@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import SafeStateManager from "../lib/safeState";
 import { ResponsiveContainer, AreaChart, Area, YAxis } from "recharts";
 import { quickTickers } from "./tickerList";
 import {
@@ -721,7 +722,7 @@ export default function MarketTerminal() {
   const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
   const [hasLoadedPersistentSettings, setHasLoadedPersistentSettings] = useState<boolean>(false);
 
-  const LIQUIDATION_COOLDOWN_MS = 30 * 60 * 1000;
+  const LIQUIDATION_COOLDOWN_MS = 60 * 60 * 1000; // increased to 1 hour
   const AUTOPILOT_MIN_HOLD_MS = 8 * 60 * 1000;
   const AUTOPILOT_MAX_TRADES_PER_DAY = 500;
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
@@ -755,6 +756,46 @@ export default function MarketTerminal() {
       // ignore toast failures
     }
   }, [showToast]);
+
+  // Safe state manager (pause/resume autopilot, cancel orders)
+  const safeStateRef = useRef<SafeStateManager | null>(null);
+  const [isSafeStateActive, setIsSafeStateActive] = useState(false);
+
+  useEffect(() => {
+    safeStateRef.current = new SafeStateManager({
+      cancelOrders: cancelUnresolvedBrokerOrders,
+      pauseAutopilot: () => setIsAutopilotActive(false),
+      resumeAutopilot: () => setIsAutopilotActive(true),
+      addLog: addLog,
+      showToast: (m: string, t?: any) => showToast(m, t || "INFO"),
+      onChange: (isSafe: boolean) => setIsSafeStateActive(isSafe),
+    });
+    return () => {
+      safeStateRef.current = null;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleSafeState = useCallback(async () => {
+    const mgr = safeStateRef.current;
+    if (!mgr) return;
+    if (isSafeStateActive) {
+      await mgr.exitSafeState('manual');
+    } else {
+      await mgr.enterSafeState('manual');
+    }
+  }, [isSafeStateActive]);
+
+  // Auto-enter safe state when connection or tick-stream drops
+  useEffect(() => {
+    const mgr = safeStateRef.current;
+    if (!mgr) return;
+    if (!isConnected || !isTickStreamActive) {
+      void mgr.enterSafeState("connection_or_stream_lost");
+    } else {
+      void mgr.exitSafeState("connection_restored");
+    }
+  }, [isConnected, isTickStreamActive]);
 
   // Load persisted global TP/SL from localStorage on mount
   useEffect(() => {
@@ -852,6 +893,31 @@ export default function MarketTerminal() {
       }
       const savedFailurePause = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotFailurePauseSeconds");
       if (savedFailurePause) setAutopilotFailurePauseSeconds(Math.max(30, parseInt(savedFailurePause)));
+      // Restore persisted per-symbol cooldowns (if any) and clean expired entries
+      try {
+        if (typeof window !== "undefined") {
+          const rawCd = localStorage.getItem("sentry:autopilotCooldowns");
+          if (rawCd) {
+            try {
+              const parsed = JSON.parse(rawCd || "{}") as Record<string, number>;
+              const now = Date.now();
+              const cleaned: Record<string, number> = {};
+              for (const k of Object.keys(parsed)) {
+                const v = Number(parsed[k]);
+                if (!Number.isFinite(v)) continue;
+                if (v > now) {
+                  cleaned[k] = v;
+                }
+              }
+              autopilotBuyCooldownUntilRef.current = { ...(autopilotBuyCooldownUntilRef.current || {}), ...cleaned };
+              // persist cleaned map back
+              localStorage.setItem("sentry:autopilotCooldowns", JSON.stringify(cleaned));
+            } catch (e) {
+              // ignore parse errors
+            }
+          }
+        }
+      } catch (e) {}
       setHasLoadedPersistentSettings(true);
     } catch (e) {
       // ignore
@@ -1114,6 +1180,7 @@ export default function MarketTerminal() {
   const autopilotFailureStrikeRef = useRef<number>(0);
   const lastErrorOutcomeAtRef = useRef<number>(0);;
   const autopilotPositionOpenedAtRef = useRef<Record<string, { openedAt: number; entryPrice: number }>>({});
+  const prevAlpacaPositionsRef = useRef<Position[]>([]);
   const autopilotPriceWindowRef = useRef<Record<string, number[]>>({});
   const autopilotMarketStatsRef = useRef<Record<string, AutopilotMarketStats>>({});
   const autopilotDailyGuardRef = useRef<{ dayKey: string; trades: number; realizedPnl: number }>({ dayKey: "", trades: 0, realizedPnl: 0 });
@@ -1128,6 +1195,16 @@ export default function MarketTerminal() {
     if (!symbolClean) return;
     autopilotBuyCooldownUntilRef.current[symbolClean] = Date.now() + LIQUIDATION_COOLDOWN_MS;
     addAutopilotLog(`Liquidation cooldown armed for ${symbolClean}: buy re-entry paused for ${Math.floor(LIQUIDATION_COOLDOWN_MS / 1000)}s (${source}).`, "info");
+    try {
+      if (typeof window !== "undefined") {
+        const existing = typeof window !== "undefined" ? localStorage.getItem("sentry:autopilotCooldowns") : null;
+        const parsed = existing ? JSON.parse(existing) : {};
+        parsed[symbolClean] = autopilotBuyCooldownUntilRef.current[symbolClean];
+        localStorage.setItem("sentry:autopilotCooldowns", JSON.stringify(parsed));
+      }
+    } catch (e) {
+      // ignore storage errors
+    }
   }, [LIQUIDATION_COOLDOWN_MS, addAutopilotLog]);
 
   const isLossMakingPosition = useCallback((pos: any): boolean => {
@@ -1436,7 +1513,36 @@ export default function MarketTerminal() {
 
       setAlpacaAccount(rawData.account);
       const mergedPositions = await mergeBinanceSpotIntoPositions(rawData.positions || []);
+      // Detect externally-closed positions: compare previous synced positions to the newly fetched set.
+      try {
+        const prev = prevAlpacaPositionsRef.current || [];
+        const prevBySym: Record<string, Position> = {};
+        for (const p of prev) prevBySym[String(p.symbol || "").toUpperCase()] = p;
+        const newSyms = new Set((mergedPositions || []).map((p: any) => String(p.symbol || "").toUpperCase()));
+        for (const symKey of Object.keys(prevBySym)) {
+          if (!newSyms.has(symKey)) {
+            const prevPos = prevBySym[symKey];
+            // If the position was loss-making at previous sync, arm cooldown to avoid immediate re-entry
+            try {
+              if (isLossMakingPosition(prevPos)) {
+                // Only arm if not already on cooldown
+                const until = autopilotBuyCooldownUntilRef.current[symKey] || 0;
+                if (Date.now() > until) {
+                  armLiquidationCooldown(symKey, "external position close");
+                }
+              }
+            } catch (e) {
+              // ignore detection errors
+            }
+          }
+        }
+      } catch (e) {
+        // swallow any detection errors to avoid breaking sync
+      }
+
       setAlpacaPositions(mergedPositions);
+      // store for next refresh comparison
+      prevAlpacaPositionsRef.current = mergedPositions;
       {
         const refreshedQtyBySymbol: Record<string, number> = {};
         for (const p of (mergedPositions || [])) {
@@ -5451,6 +5557,16 @@ if __name__ == "__main__":
         <label className="text-sm">Broker:</label>
         <div className="text-sm px-2 py-1 rounded bg-brand-input">Alpaca (US market only)</div>
       </div>
+      <div className="mb-4 flex items-center gap-3">
+        <button
+          onClick={() => void toggleSafeState()}
+          className={`px-3 py-2 rounded text-sm font-semibold flex items-center gap-2 ${isSafeStateActive ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white`}
+        >
+          <ShieldAlert className="h-4 w-4" />
+          {isSafeStateActive ? 'Exit SafeState' : 'Enter SafeState'}
+        </button>
+        <div className="text-sm text-gray-300 font-mono">SafeState: {isSafeStateActive ? 'ACTIVE' : 'INACTIVE'}</div>
+      </div>
       {/* Confirmation Modal */}
       {confirmModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -6280,7 +6396,7 @@ if __name__ == "__main__":
               {useAlpacaLive && (
                 <button
                   id="refresh-positions-button"
-                  onClick={handleRefreshData}
+                  onClick={() => void handleRefreshData()}
                   disabled={isRefreshing}
                   className="p-2 bg-brand-border hover:bg-brand-border/85 border border-brand-border text-gray-300 hover:text-white rounded-lg flex items-center gap-1.5 text-xs transition font-semibold"
                 >

@@ -1,0 +1,30 @@
+GEMINI_API_KEY=AIzaSyCpJhDeqh2jKwczWJtK6FUJHr73OsIlVvU
+BINANCE_KEY='OEYDAFl3w2XR564eCnBFwQTIkcVLNyGHE4AdkWSQo8WmtPJ7MldFZDywPzV33Dly'
+BINANCE_SECRET='Ea1qeLxWDRXZGhhfnVP1hPuYFajXjd27e9DjpX7at4DXS0xDADVuSgEmgUb7x0uy'
+
+ALPACA_KEY='AKQ3LMU3ETYDFBPDA6ZJL4KSVP'
+ALPACA_SECRET='2fp8XjsQuxPHcDh2cWkE3f37aRfqwi7miiJDGE6trJB5'
+ALPACA_PAPER_KEY='PKFFW4Y6SBNUIKDQBKGB2QDCZ4'
+ALPACA_PAPER_SECRET='J5RQjrc8VqgybNiDKs5z6nqz1E9Awd27YuxpX4xng573'
+# AngelOne (SmartAPI) - used for NSE trading (paper or live)
+# Copy these into your local `.env.local` if you want the server to auto-use AngelOne creds.
+ANGEL_API_KEY=DBmTfDp9
+ANGEL_CLIENT_CODE=AACG928185
+ANGEL_MPIN=0310
+ANGEL_TOTP_SEED=6IACNTLH2UA33VCDFYUDQSVPIM
+
+# Optional AngelOne controls
+ANGEL_API_BASE=https://apiconnect.angelone.in
+# NOTE: Switched to live mode locally. Keep secret values as-is; do NOT commit.
+ANGEL_USE_SERVER_CREDS=true
+ANGEL_ENV=live
+
+# Backwards-compatible Alpaca env names expected by the proxy
+# (Duplicate existing values under the names the server code checks)
+ALPACA_PAPER_API_KEY='PKFFW4Y6SBNUIKDQBKGB2QDCZ4'
+ALPACA_PAPER_API_SECRET='J5RQjrc8VqgybNiDKs5z6nqz1E9Awd27YuxpX4xng573'
+ALPACA_API_KEY='AKQ3LMU3ETYDFBPDA6ZJL4KSVP'
+ALPACA_API_SECRET='2fp8XjsQuxPHcDh2cWkE3f37aRfqwi7miiJDGE6trJB5'
+ALPACA_LIVE_API_KEY='AKQ3LMU3ETYDFBPDA6ZJL4KSVP'
+ALPACA_LIVE_API_SECRET='2fp8XjsQuxPHcDh2cWkE3f37aRfqwi7miiJDGE6trJB5'
+

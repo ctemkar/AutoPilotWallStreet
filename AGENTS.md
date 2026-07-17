@@ -1,4 +1,4 @@
-# Agent Instructions for AnnouncementStockTrading
+# Agent Instructions for AutopilotAlpha
 
 ## Scope
 These instructions apply to the whole repository.
