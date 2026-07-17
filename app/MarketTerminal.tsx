@@ -3091,6 +3091,22 @@ export default function MarketTerminal() {
     setTimeout(() => setToast(null), 4000);
   }, [executeAutopilotOrder, addAutopilotLog, logScanOrderOutcome]);
 
+  // Debug helper: force-clear any autopilot pause state and pending buys
+  const forceResumeAutopilot = useCallback(() => {
+    try {
+      networkFailureResumeAtRef.current = 0;
+      networkFailurePauseLogRef.current = 0;
+      autopilotFailureStrikeRef.current = 0;
+      autopilotPendingBuySymbolsRef.current.clear();
+      setAutopilotScanError(null);
+      setAutopilotScanErrorCount(0);
+      addAutopilotLog("Force resume: cleared autopilot pause and pending buys.", "warn");
+      setIsAutopilotActive(true);
+    } catch (e) {
+      // ignore
+    }
+  }, [addAutopilotLog]);
+
   const autopilotRunningRef = useRef(false);
   const autopilotCapPauseRef = useRef<string | null>(null);
 
@@ -7075,7 +7091,16 @@ if __name__ == "__main__":
                   <div className="rounded-xl border border-brand-border/40 bg-zinc-950/40 p-3 mt-3 text-white" id="autopilot-scan-list-card">
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-[10px] uppercase tracking-[0.3em] text-gray-400 font-semibold font-mono">Autopilot Scan Status</span>
-                      <span className="text-[11px] text-sky-300 font-semibold font-mono">{autopilotScanTotalTargets} targets</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-sky-300 font-semibold font-mono">{autopilotScanTotalTargets} targets</span>
+                        <button
+                          type="button"
+                          onClick={() => forceResumeAutopilot()}
+                          className="px-2 py-1 bg-yellow-600 text-black rounded text-[10px] font-semibold"
+                        >
+                          Force Resume
+                        </button>
+                      </div>
                     </div>
                     {autopilotCurrentScanTarget ? (
                       <div className="mb-2 rounded-xl border border-sky-500/20 bg-sky-950/10 px-3 py-2 text-[11px] text-sky-200">
