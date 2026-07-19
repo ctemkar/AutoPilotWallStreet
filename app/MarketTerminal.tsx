@@ -294,6 +294,12 @@ function getMarketSessionET(): "OPEN" | "EXTENDED" | "CLOSED" {
   return "CLOSED";
 }
 
+function resolveBuyingPower(alpacaAccount?: any): number {
+  const regt = parseFloat(alpacaAccount?.regt_buying_power ?? "0");
+  const bp = parseFloat(alpacaAccount?.buying_power ?? "0");
+  return Number.isFinite(regt) && regt > 0 ? regt : (Number.isFinite(bp) ? bp : 0);
+}
+
 const HYDRATION_SAFE_TIME_PLACEHOLDER = "--:--";
 
 export default function MarketTerminal() {
@@ -1579,7 +1585,7 @@ export default function MarketTerminal() {
       if (!options?.silent) {
         const cashValue = parseFloat(alpacaAccount?.cash || "0");
         const equityValue = parseFloat(alpacaAccount?.equity || alpacaAccount?.portfolio_value || "0");
-        const buyingPowerValue = parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || "0");
+        const buyingPowerValue = resolveBuyingPower(alpacaAccount);
         addLog(
           "ALPACA",
           "SYNC",
@@ -2087,7 +2093,7 @@ export default function MarketTerminal() {
 
           const estimatedCost = estPrice * qtyNum;
           const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-          const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
+          const rawBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
           const isFractional = qtyNum % 1 !== 0;
           const maxAllowedPower = Math.max(0, Math.min(rawBuyingPower, cashValue * 4));
           const effectiveAllowedPower = Math.max(0, maxAllowedPower);
@@ -2164,7 +2170,7 @@ export default function MarketTerminal() {
               };
             }
 
-            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
+            const rawBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
             if (!Number.isFinite(rawBuyingPower) || rawBuyingPower <= 0) {
                   addAutopilotLog(`Blocked live short of ${symbolClean}: account buying power looks insufficient to support margin shorting.`, "warn");
                   addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean} due to low buying power.`, "WARNING");
@@ -2235,7 +2241,7 @@ export default function MarketTerminal() {
           if (side === "BUY") {
             const maxCryptoBuyUsd = Math.max(
               100,
-              Math.min(parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0"), parseFloat(curRef.alpacaAccount?.cash || "0")) * 0.2
+              Math.min(resolveBuyingPower(curRef.alpacaAccount), parseFloat(curRef.alpacaAccount?.cash || "0")) * 0.2
             );
             const cappedQty = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
             if (cryptoQtyToSend * estPrice > maxCryptoBuyUsd) {
@@ -2273,7 +2279,7 @@ export default function MarketTerminal() {
 
           if (!maxSafeOrderVal || maxSafeOrderVal <= 0) {
             const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
+            const rawBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
             const isFractional = finalQty % 1 !== 0;
             const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
             maxSafeOrderVal = maxAllowedPower * 0.7;
@@ -3306,7 +3312,7 @@ export default function MarketTerminal() {
 
         const isLiveMode = !!curRef.useAlpacaLive;
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
-        const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
+        const rawBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
         const liveBudget = isLiveMode
           ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.7)
           : 0;
@@ -3395,6 +3401,20 @@ export default function MarketTerminal() {
         const existingQty = existingScalperPos.qty;
         const existingEntry = Number(existingScalperPos.avg_entry_price || 0);
         if (existingQty > 0 && existingEntry > 0) {
+          // Absolute dollar-based stop loss: force exit if unrealized loss exceeds this amount
+          const ABSOLUTE_DOLLAR_STOP = 25; // dollars
+          try {
+            const unrealizedDollar = (currentSpotPrice - existingEntry) * existingQty;
+            if (unrealizedDollar <= -ABSOLUTE_DOLLAR_STOP) {
+              addAutopilotLog(`🛑 Absolute $${ABSOLUTE_DOLLAR_STOP} stop-loss breached: ${targetSymbol} unrealized ${unrealizedDollar.toFixed(2)}. Forcing exit.`, "warn");
+              const sellQtyForce = existingQty;
+              const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQtyForce);
+              logScanOrderOutcome("ABS_DOLLAR_SL", orderOutcome);
+              continue;
+            }
+          } catch (e) {
+            // ignore diagnostic failures here
+          }
           const pnlPct = ((currentSpotPrice - existingEntry) / existingEntry) * 100;
           const tpPct = Number(curRef.globalTakeProfitPercent || 15);
           const slPct = Number(curRef.globalStopLossPercent || 5);
@@ -3573,9 +3593,24 @@ export default function MarketTerminal() {
             }
 
             // Also enforce global percent-based TP/SL (quant-style)
-            try {
+              try {
               const cur = stateRef.current as any;
               const entry = (tState as any).entryPrice || tState.limitPrice || 0;
+              // Absolute dollar-based stop loss check
+              try {
+                const ABSOLUTE_DOLLAR_STOP = 25;
+                const isBuyCheck = tState.side === "BUY";
+                const unrealizedDollarCheck = isBuyCheck ? (currentSpotPrice - entry) * (getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0) : 0;
+                if (unrealizedDollarCheck <= -ABSOLUTE_DOLLAR_STOP) {
+                  addAutopilotLog(`🛑 Absolute $${ABSOLUTE_DOLLAR_STOP} stop-loss breached (Touch&Turn): ${targetSymbol} unrealized ${unrealizedDollarCheck.toFixed(2)}. Forcing exit.`, "warn");
+                  const sellQtyForce = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0;
+                  const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQtyForce);
+                  logScanOrderOutcome("ABS_DOLLAR_SL", orderOutcome);
+                  stateChange = "HIT_STOP";
+                }
+              } catch (e) {
+                // ignore
+              }
               if (entry && cur && (cur.globalTakeProfitPercent || cur.globalStopLossPercent)) {
                 const isBuy = tState.side === "BUY";
                 const pct = isBuy
@@ -4647,6 +4682,38 @@ export default function MarketTerminal() {
             console.error('auto-liquidate error', e);
           }
         }
+
+        // Per-position absolute-dollar stop: close any single position losing more than $10
+        try {
+          const absPerStockStop = 10; // dollars
+          const livePositions = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
+          for (const p of (livePositions || [])) {
+            try {
+              const qty = parseFloat(p.qty || 0);
+              if (!(qty > 0)) continue;
+              const entry = parseFloat(p.avg_entry_price || 0);
+              const curPrice = parseFloat(p.current_price || p.last_trade?.price || 0);
+              if (!entry || !curPrice) continue;
+              const unrealized = (curPrice - entry) * qty;
+              if (unrealized <= -absPerStockStop && !(autopilotLossGuardBlockedUntilRef.current[p.symbol] > Date.now())) {
+                addLog(p.symbol, 'AUTO_ABS_DOLLAR_SL', `Per-stock absolute $${absPerStockStop} stop breached (unrealized ${unrealized.toFixed(2)}). Attempting forced SELL.`, 'WARNING');
+                addAutopilotLog(`🛑 Per-stock $${absPerStockStop} stop-loss: ${p.symbol} unrealized ${unrealized.toFixed(2)}. Forcing exit.`, 'warn');
+                // attempt forced sell
+                try {
+                  await executeAutopilotOrder(p.symbol, 'SELL', qty);
+                  // arm cooldown
+                  autopilotLossGuardBlockedUntilRef.current[p.symbol] = Date.now() + LIQUIDATION_COOLDOWN_MS;
+                } catch (e) {
+                  console.error('auto forced sell failed', e);
+                }
+              }
+            } catch (e) {
+              // ignore per-position errors
+            }
+          }
+        } catch (e) {
+          // swallow
+        }
       }
     };
     // run immediately and then every 30s
@@ -4731,7 +4798,7 @@ export default function MarketTerminal() {
         }
       } else if (side === "BUY") {
         const cashValue = parseFloat(alpacaAccount?.cash || "0");
-        const rawBuyingPower = parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || "0");
+        const rawBuyingPower = resolveBuyingPower(alpacaAccount);
         const isFractional = targetQtyNum % 1 !== 0;
         const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
         const maxSafeOrderCost = maxAllowedPower * 0.96;
@@ -5842,7 +5909,7 @@ if __name__ == "__main__":
                     </div>
                     <div className="rounded-lg bg-black/20 px-3 py-2">
                       <div className="text-[10px] uppercase tracking-wide text-gray-400">Buying Power</div>
-                      <div className="text-sm font-semibold text-violet-400">${parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                      <div className="text-sm font-semibold text-violet-400">${resolveBuyingPower(alpacaAccount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     </div>
                   </div>
                 </div>
@@ -6078,7 +6145,7 @@ if __name__ == "__main__":
               Alpaca Reg-T Buying Power
             </span>
             <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="buying-power-number">
-              ${(liveAccountReady ? parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || 0) : activeCash * simLeverageLimit).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              ${(liveAccountReady ? resolveBuyingPower(alpacaAccount) : activeCash * simLeverageLimit).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
             <div className="text-xs text-gray-400 mt-1.5 font-mono" id="stat-buying-power-description">
               {liveAccountReady
