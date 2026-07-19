@@ -721,6 +721,7 @@ export default function MarketTerminal() {
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(70); // percent of portfolio per symbol
+  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(20000); // absolute dollar cap per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(4); // concurrent open positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
@@ -897,6 +898,11 @@ export default function MarketTerminal() {
         // No saved value: default to 15s
         setAutopilotInterval(15);
       }
+      const savedPerSymbolCap = typeof window !== "undefined" && localStorage.getItem("sentry:perSymbolDollarCap");
+      if (savedPerSymbolCap) {
+        const parsed = parseFloat(savedPerSymbolCap);
+        if (!Number.isNaN(parsed)) setPerSymbolDollarCap(parsed);
+      }
       const savedFailurePause = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotFailurePauseSeconds");
       if (savedFailurePause) setAutopilotFailurePauseSeconds(Math.max(30, parseInt(savedFailurePause)));
       // Restore persisted per-symbol cooldowns (if any) and clean expired entries
@@ -954,6 +960,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:globalSL", String(globalStopLossPercent));
         localStorage.setItem("sentry:minAvgVol", String(minAvgVolume));
         localStorage.setItem("sentry:maxExposurePct", String(maxExposurePercentPerSymbol));
+        localStorage.setItem("sentry:perSymbolDollarCap", String(perSymbolDollarCap));
         localStorage.setItem("sentry:maxConcurrent", String(maxConcurrentPositions));
         localStorage.setItem("sentry:liveMinQty", String(liveMinOrderQty));
         localStorage.setItem("sentry:autoLiquidateBeforeClose", String(autoLiquidateBeforeClose));
@@ -971,7 +978,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:isTickStreamActive", String(isTickStreamActive));
       }
     } catch (e) {}
-  }, [hasLoadedPersistentSettings, autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, liveMinOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin, autopilotLossGuard, autopilotFailurePauseSeconds, autopilotBlacklist, tradeFormTab, isTickStreamActive]);
+  }, [hasLoadedPersistentSettings, autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, perSymbolDollarCap, maxConcurrentPositions, liveMinOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin, autopilotLossGuard, autopilotFailurePauseSeconds, autopilotBlacklist, tradeFormTab, isTickStreamActive]);
 
   // Crypto-only auto-switch removed: non-crypto buys are allowed at all times unless explicitly blocked.
 
@@ -1400,7 +1407,10 @@ export default function MarketTerminal() {
 
     exposurePct = Math.min(exposureCap, Math.max(baseExposurePct, exposurePct));
     const targetValue = totalPortfolio * (exposurePct / 100);
-    const qtyFromExposure = targetValue / currentPrice;
+    // Enforce absolute per-symbol dollar cap if configured
+    const perSymbolCap = Number(stateRef.current.perSymbolDollarCap) || Number.POSITIVE_INFINITY;
+    const cappedTargetValue = Math.min(targetValue, perSymbolCap);
+    const qtyFromExposure = cappedTargetValue / currentPrice;
 
     const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
     const maxQty = isAlpaca
@@ -1639,6 +1649,7 @@ export default function MarketTerminal() {
     autopilotBlacklist,
     minAvgVolume,
     maxExposurePercentPerSymbol,
+    perSymbolDollarCap,
     maxConcurrentPositions,
     liveMinOrderQty,
   });
@@ -1676,6 +1687,7 @@ export default function MarketTerminal() {
       autopilotBlacklist,
       minAvgVolume,
       maxExposurePercentPerSymbol,
+      perSymbolDollarCap,
       maxConcurrentPositions,
       liveMinOrderQty,
       blockedMarkets,
@@ -7252,6 +7264,20 @@ if __name__ == "__main__":
                         className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
                       />
                       <p className="text-[9px] text-gray-500 mt-1">Cap percent allocation per symbol.</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Per-Symbol $ Cap</label>
+                      <input
+                        id="per-symbol-cap-input"
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={perSymbolDollarCap}
+                        onChange={(e) => setPerSymbolDollarCap(Number.isFinite(parseFloat(e.target.value)) ? Math.max(0, parseFloat(e.target.value)) : 0)}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                      />
+                      <p className="text-[9px] text-gray-500 mt-1">Absolute dollar cap per symbol (prevents oversized allocations).</p>
                     </div>
 
                     <div>
