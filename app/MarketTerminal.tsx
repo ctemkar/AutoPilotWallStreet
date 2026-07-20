@@ -716,8 +716,8 @@ export default function MarketTerminal() {
   const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
-  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(15); // e.g. 15% take profit
-  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(3); // e.g. 3% stop loss
+  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(1.2); // Reduced from 15% to 1.2% for faster turnover
+  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(0.8); // Reduced from 3% to 0.8% to tighten risk
 
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
@@ -731,7 +731,7 @@ export default function MarketTerminal() {
   const [hasLoadedPersistentSettings, setHasLoadedPersistentSettings] = useState<boolean>(false);
 
   const LIQUIDATION_COOLDOWN_MS = 60 * 60 * 1000; // increased to 1 hour
-  const AUTOPILOT_MIN_HOLD_MS = 8 * 60 * 1000;
+  const AUTOPILOT_MIN_HOLD_MS = 2 * 60 * 1000; // Reduced from 8m to 2m for faster exits
   const AUTOPILOT_MAX_TRADES_PER_DAY = 500;
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
   const AUTOPILOT_MIN_TREND_STRENGTH = 0.55;
@@ -1798,12 +1798,12 @@ export default function MarketTerminal() {
     }
 
     const isFullCloseAttempt = !!existingPositionBeforeOrder && (
-      (existingPositionBeforeOrder.qty > 0 && side === "SELL" && qtyNum >= existingPositionBeforeOrder.qty) ||
-      (existingPositionBeforeOrder.qty < 0 && side === "BUY" && qtyNum >= Math.abs(existingPositionBeforeOrder.qty))
+      (existingPositionBeforeOrder.qty > 0 && side === "SELL" && qtyNum >= existingPositionBeforeOrder.qty * 0.98) ||
+      (existingPositionBeforeOrder.qty < 0 && side === "BUY" && qtyNum >= Math.abs(existingPositionBeforeOrder.qty) * 0.98)
     );
     const isLossCloseAttempt = isFullCloseAttempt && isLossMakingPosition(existingPositionBeforeOrder);
 
-    if (side === "SELL") {
+    if (side === "SELL" || (side === "BUY" && existingPositionBeforeOrder && existingPositionBeforeOrder.qty < 0)) {
       const openedMeta = autopilotPositionOpenedAtRef.current[symbolClean];
       const heldMs = openedMeta ? Date.now() - openedMeta.openedAt : Number.POSITIVE_INFINITY;
       if (openedMeta && heldMs < AUTOPILOT_MIN_HOLD_MS && !isLossCloseAttempt) {
@@ -3149,22 +3149,6 @@ export default function MarketTerminal() {
     setTimeout(() => setToast(null), 4000);
   }, [executeAutopilotOrder, addAutopilotLog, logScanOrderOutcome]);
 
-  // Debug helper: force-clear any autopilot pause state and pending buys
-  const forceResumeAutopilot = useCallback(() => {
-    try {
-      networkFailureResumeAtRef.current = 0;
-      networkFailurePauseLogRef.current = 0;
-      autopilotFailureStrikeRef.current = 0;
-      autopilotPendingBuySymbolsRef.current.clear();
-      setAutopilotScanError(null);
-      setAutopilotScanErrorCount(0);
-      addAutopilotLog("Force resume: cleared autopilot pause and pending buys.", "warn");
-      setIsAutopilotActive(true);
-    } catch (e) {
-      // ignore
-    }
-  }, [addAutopilotLog]);
-
   const autopilotRunningRef = useRef(false);
   const autopilotCapPauseRef = useRef<string | null>(null);
 
@@ -3365,8 +3349,11 @@ export default function MarketTerminal() {
         const isLiveMode = !!curRef.useAlpacaLive;
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
         const rawBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
+        // Fixed: Scalper budget was using 70% of BP per symbol, leading to massive over-leverage and instant liquidation
+        // Changed to use the configured exposure cap (default 7%) instead of hardcoded 0.7
+        const exposureLimit = Math.max(1, Math.min(20, Number(curRef.maxExposurePercentPerSymbol) || 7)) / 100;
         const liveBudget = isLiveMode
-          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.7)
+          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * exposureLimit)
           : 0;
         const liveMinQty = Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
@@ -3379,7 +3366,9 @@ export default function MarketTerminal() {
         const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
         const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
         const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps));
-        const shouldFallbackBuy = !existingScalperPos && liveQtyByBudget > 0 && (!hasMatureSignal || (Math.abs(stat?.trendStrength || 0) < 0.25 && Math.abs(stat?.expectedEdgeBps || 0) < (stat?.estimatedCostBps || 0) + AUTOPILOT_MIN_EDGE_BUFFER_BPS));
+        // Fixed: Falling back to BUY when no signal is present or trend is weak is dangerous in a bear market.
+        // Forcing shouldFallbackBuy to false to ensure we only trade on verified signals.
+        const shouldFallbackBuy = false;
 
         if (hasPendingSeedBuy) {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
@@ -3453,8 +3442,8 @@ export default function MarketTerminal() {
         const existingQty = existingScalperPos.qty;
         const existingEntry = Number(existingScalperPos.avg_entry_price || 0);
         if (existingQty > 0 && existingEntry > 0) {
-          // Absolute dollar-based stop loss: force exit if unrealized loss exceeds this amount
-          const ABSOLUTE_DOLLAR_STOP = 25; // dollars
+          // Fixed: Reduced absolute stop from $25 to $10 to prevent large drawdowns
+          const ABSOLUTE_DOLLAR_STOP = 10; // dollars
           try {
             const unrealizedDollar = (currentSpotPrice - existingEntry) * existingQty;
             if (unrealizedDollar <= -ABSOLUTE_DOLLAR_STOP) {
@@ -3650,9 +3639,13 @@ export default function MarketTerminal() {
               const entry = (tState as any).entryPrice || tState.limitPrice || 0;
               // Absolute dollar-based stop loss check
               try {
-                const ABSOLUTE_DOLLAR_STOP = 25;
+                // Fixed: Reduced absolute stop from $25 to $10 to prevent large drawdowns
+                const ABSOLUTE_DOLLAR_STOP = 10;
                 const isBuyCheck = tState.side === "BUY";
-                const unrealizedDollarCheck = isBuyCheck ? (currentSpotPrice - entry) * (getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0) : 0;
+                // Fixed: Corrected short-side PnL calculation for dollar stop
+                const unrealizedDollarCheck = isBuyCheck 
+                  ? (currentSpotPrice - entry) * (getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0) 
+                  : (entry - currentSpotPrice) * (getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0);
                 if (unrealizedDollarCheck <= -ABSOLUTE_DOLLAR_STOP) {
                   addAutopilotLog(`🛑 Absolute $${ABSOLUTE_DOLLAR_STOP} stop-loss breached (Touch&Turn): ${targetSymbol} unrealized ${unrealizedDollarCheck.toFixed(2)}. Forcing exit.`, "warn");
                   const sellQtyForce = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0;
@@ -4302,6 +4295,33 @@ export default function MarketTerminal() {
       setIsAutopilotRunning(false);
   }
   }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, setElliottState, addAutopilotLog, logScanOrderOutcome, autopilotInterval, autopilotScanBroadUniverse, recordMarketStat, getAutopilotTradeQty, computeOpenCounts, fetchAutopilotQuote]);
+
+  // Debug helper: force-clear any autopilot pause state and pending buys
+  const forceResumeAutopilot = useCallback(() => {
+    try {
+      networkFailureResumeAtRef.current = 0;
+      networkFailurePauseLogRef.current = 0;
+      autopilotFailureStrikeRef.current = 0;
+      autopilotPendingBuySymbolsRef.current.clear();
+      autopilotCapPauseRef.current = null;
+      setAutopilotScanError(null);
+      setAutopilotScanErrorCount(0);
+      
+      // Reset running flags in case it got stuck
+      autopilotRunningRef.current = false;
+      setIsAutopilotRunning(false);
+      
+      // Activate and trigger immediate scan
+      setIsAutopilotActive(true);
+      setScanningEnabled(true);
+      setAutopilotNextScanInSec(0);
+      
+      addAutopilotLog("Force resume: cleared autopilot pause and pending buys. Triggering immediate scan...", "warn");
+      executeAutopilotScan();
+    } catch (e) {
+      // ignore
+    }
+  }, [addAutopilotLog, executeAutopilotScan]);
 
   useEffect(() => {
     if (!isAutopilotActive) {
@@ -7198,7 +7218,7 @@ if __name__ == "__main__":
                         />
                         <button
                           type="button"
-                          onClick={() => setGlobalTakeProfitPercent(15)}
+                          onClick={() => setGlobalTakeProfitPercent(1.2)}
                           className="px-2 py-1 bg-brand-border hover:bg-brand-border/80 rounded text-[10px] font-bold"
                         >
                           Reset
@@ -7226,7 +7246,7 @@ if __name__ == "__main__":
                         />
                         <button
                           type="button"
-                          onClick={() => setGlobalStopLossPercent(5)}
+                          onClick={() => setGlobalStopLossPercent(0.8)}
                           className="px-2 py-1 bg-brand-border hover:bg-brand-border/80 rounded text-[10px] font-bold"
                         >
                           Reset
