@@ -83,6 +83,7 @@ type AutopilotOrderOutcomeCode =
   | "BLOCKED_EXPOSURE_CAP"
   | "BLOCKED_DISCONNECTED"
   | "BLOCKED_CASH_BUFFER"
+  | "BLOCKED_LOW_CASH"
   | "BLOCKED_SHORT_RESTRICTED"
   | "BLOCKED_NEGLIGIBLE_QTY"
   | "BLOCKED_BUYING_POWER"
@@ -2116,6 +2117,21 @@ export default function MarketTerminal() {
           const effectiveAllowedPower = Math.max(0, maxAllowedPower);
           const maxSafeOrderVal = effectiveAllowedPower;
 
+          // Safety: refuse buys when available cash is critically low
+          if (side === "BUY" && cashValue < 500) {
+            addAutopilotLog(`Blocked live automated BUY: available cash $${cashValue.toFixed(2)} below safety minimum $500.`, "warn");
+            addLog(symbolClean, "AUTO_BUY_BLOCKED", `Available cash $${cashValue.toFixed(2)} below $500 safety minimum.`, "WARNING");
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_LOW_CASH",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: `Available cash $${cashValue.toFixed(2)} below safety minimum $500.`
+            };
+          }
+
           if (effectiveAllowedPower <= 0) {
             addAutopilotLog(`Blocked live automated BUY: account buying power is unavailable or negative (${maxAllowedPower.toFixed(2)}).`, "warn");
             addLog(symbolClean, "AUTO_BUY_BLOCKED", `Account buying power unavailable or negative (${maxAllowedPower.toFixed(2)}).`, "WARNING");
@@ -2304,6 +2320,25 @@ export default function MarketTerminal() {
               addAutopilotLog(`Binance USDT balance is low (${prefUsdt.toFixed(2)}). Falling back to Alpaca buying power for crypto trade sizing.`, "info");
             }
           }
+
+          // Safety: refuse buys when available cash is critically low
+          try {
+            const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+            if (side === "BUY" && cashValue < 500) {
+              setIsPlacingOrder(false);
+              setOrderError(`Blocked: available cash $${cashValue.toFixed(2)} is below safety minimum $500.`);
+              addLog(normSymbol, "BUY_FAILED", `Blocked buy: available cash $${cashValue.toFixed(2)} < $500 safety minimum.`, "WARNING");
+              return {
+                status: "BLOCKED",
+                code: "BLOCKED_LOW_CASH",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: `Available cash $${cashValue.toFixed(2)} below safety minimum $500.`,
+              };
+            }
+          } catch (e) {}
 
           if (intendedCost > maxSafeOrderVal) {
             setIsPlacingOrder(false);
@@ -6660,7 +6695,7 @@ if __name__ == "__main__":
                               id={`liquidate-pos-${pos.symbol}`}
                               onClick={() => openConfirmForPosition(pos.symbol)}
                               disabled={isLiquidating !== null}
-                              className="text-red-400 hover:text-white hover:bg-red-950/80 transition p-1.5 rounded-lg border border-transparent hover:border-red-900/50 flex items-center justify-center mx-auto"
+                              className="bg-red-600 text-white hover:bg-red-700 transition p-1.5 rounded-lg border border-red-700/30 flex items-center justify-center mx-auto"
                               title={`Liquidate all shares of ${pos.symbol}`}
                             >
                               <XCircle className={`h-4 w-4 ${isLiquidating === pos.symbol ? "animate-spin" : ""}`} />
@@ -6671,7 +6706,7 @@ if __name__ == "__main__":
                                 id={`liquidate-mock-pos-${pos.symbol}`}
                                 onClick={() => openConfirmForPosition(pos.symbol)}
                                 disabled={isLiquidating !== null}
-                                className="text-orange-400 hover:text-white hover:bg-orange-950/60 transition p-1.5 rounded-lg border border-transparent hover:border-orange-900/40"
+                                className="bg-red-600 text-white hover:bg-red-700 transition p-1.5 rounded-lg border border-red-700/30"
                                 title={`Liquidate simulated position ${pos.symbol} (Sell to cash)`}
                               >
                                 <XCircle className={`h-4 w-4 ${isLiquidating === pos.symbol ? "animate-spin" : ""}`} />
