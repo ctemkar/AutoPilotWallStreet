@@ -4904,6 +4904,35 @@ export default function MarketTerminal() {
           payload.qty = parseFloat(targetQtyNum.toFixed(6));
           estimatedCost = estPrice * targetQtyNum;
         }
+        // Enforce absolute per-symbol dollar cap for manual buys as well
+        try {
+          const perSymbolCapManual = Number(stateRef.current.perSymbolDollarCap) || Number.POSITIVE_INFINITY;
+          if (side === "BUY" && Number.isFinite(perSymbolCapManual) && perSymbolCapManual > 0) {
+            if (orderUnit === "USD") {
+              if (payload.notional > perSymbolCapManual) {
+                const old = payload.notional;
+                payload.notional = Math.max(0, perSymbolCapManual);
+                estimatedCost = payload.notional;
+                targetNotional = payload.notional;
+                targetQtyNum = payload.notional / estPrice;
+                setOrderQty(targetNotional.toFixed(2));
+                addLog(symbolClean, "BUY_RESIZED", `Manual USD buy resized from $${old.toFixed(2)} to $${payload.notional.toFixed(2)} due to per-symbol cap.`, "INFO");
+              }
+            } else {
+              const maxQtyFromCap = perSymbolCapManual / Math.max(estPrice, 0.000001);
+              if (targetQtyNum > maxQtyFromCap) {
+                const oldQ = targetQtyNum;
+                targetQtyNum = Math.max(0, maxQtyFromCap);
+                payload.qty = parseFloat(targetQtyNum.toFixed(6));
+                estimatedCost = estPrice * targetQtyNum;
+                setOrderQty(targetQtyNum.toString());
+                addLog(symbolClean, "BUY_RESIZED", `Manual share buy resized from ${oldQ} to ${targetQtyNum} shares due to per-symbol cap (~$${perSymbolCapManual.toFixed(2)}).`, "INFO");
+              }
+            }
+          }
+        } catch (e) {
+          // swallow cap check errors
+        }
         payload.estimatedPrice = estPrice;
 
         const response = await fetch("/api/alpaca/trade", {
