@@ -144,32 +144,38 @@ export async function POST(req: Request) {
       console.warn("Alpaca positions fetch error:", positionsResult.reason?.message || positionsResult.reason);
     }
 
+    // Coerce numeric fields to numbers to avoid string-falsy bugs (e.g. "0")
+    const safeNumber = (v: any) => {
+      const n = typeof v === "number" ? v : parseFloat(String(v || "0"));
+      return Number.isFinite(n) ? n : 0;
+    };
+
     return NextResponse.json({
       account: {
         // Expose last_equity so front-end can compute day change (Live Day P&L)
-        last_equity: accountData.last_equity,
+        last_equity: safeNumber(accountData.last_equity),
         account_number: accountData.account_number,
-        cash: accountData.cash,
-        equity: accountData.equity,
-        buying_power: accountData.buying_power,
-        portfolio_value: accountData.portfolio_value,
-        regt_buying_power: accountData.regt_buying_power,
-        daytrading_buying_power: accountData.daytrading_buying_power,
-        maintenance_margin: accountData.maintenance_margin,
-        initial_margin: accountData.initial_margin,
-        long_market_value: accountData.long_market_value,
-        short_market_value: accountData.short_market_value,
+        cash: safeNumber(accountData.cash),
+        equity: safeNumber(accountData.equity),
+        buying_power: safeNumber(accountData.buying_power),
+        portfolio_value: safeNumber(accountData.portfolio_value),
+        regt_buying_power: safeNumber(accountData.regt_buying_power),
+        daytrading_buying_power: safeNumber(accountData.daytrading_buying_power),
+        maintenance_margin: safeNumber(accountData.maintenance_margin),
+        initial_margin: safeNumber(accountData.initial_margin),
+        long_market_value: safeNumber(accountData.long_market_value),
+        short_market_value: safeNumber(accountData.short_market_value),
         shorting_enabled: accountData.shorting_enabled,
       },
       positions: positionsData.map((pos: any) => ({
         symbol: pos.symbol,
-        qty: parseFloat(pos.qty),
+        qty: safeNumber(pos.qty),
         side: pos.side,
-        avg_entry_price: parseFloat(pos.avg_entry_price),
-        current_price: parseFloat(pos.current_price),
-        market_value: parseFloat(pos.market_value),
-        unrealized_pl: parseFloat(pos.unrealized_pl),
-        unrealized_plpc: parseFloat(pos.unrealized_plpc),
+        avg_entry_price: safeNumber(pos.avg_entry_price),
+        current_price: safeNumber(pos.current_price),
+        market_value: safeNumber(pos.market_value),
+        unrealized_pl: safeNumber(pos.unrealized_pl),
+        unrealized_plpc: safeNumber(pos.unrealized_plpc),
         maintenance_margin_rate: 0.30, // Default fallback margin rate for standard risk calculation
       })),
     });

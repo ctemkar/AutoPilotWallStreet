@@ -1150,6 +1150,10 @@ export default function MarketTerminal() {
           } catch (e) {}
         } else if (next.status === "FILLED") {
           addAutopilotLog(`[FILLED] ${next.side} ${qty} ${next.symbol} (${next.code})`, "success");
+          try {
+            // persist FILLED outcomes for forensic analysis
+            fetch('/api/operational/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ timestamp: Date.now(), outcome: next, stats: statsSnapshot }) }).catch(() => {});
+          } catch (e) {}
         } else if (next.status === "PENDING") {
           addAutopilotLog(`[PENDING] ${next.side} ${next.requestedQty} ${next.symbol} (${next.code}) - ${next.message}`, "info");
         }
@@ -1392,8 +1396,9 @@ export default function MarketTerminal() {
     const cashValue = isAlpaca ? parseFloat(curRef.alpacaAccount?.cash || "0") : parseFloat(curRef.simCash as any || 0);
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
-    const exposureCap = Math.min(70, Math.max(60, Number(curRef.maxExposurePercentPerSymbol) || 70));
-    const baseExposurePct = 70;
+    // Safer defaults: limit per-symbol % exposure to a conservative range
+    const exposureCap = Math.max(1, Math.min(20, Number(curRef.maxExposurePercentPerSymbol) || 7));
+    const baseExposurePct = 7; // default target: 7% of portfolio per symbol (was 70% - too large)
     let exposurePct = baseExposurePct;
 
     if (stats) {
