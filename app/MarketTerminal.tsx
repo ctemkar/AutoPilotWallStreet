@@ -734,10 +734,10 @@ export default function MarketTerminal() {
   const AUTOPILOT_MIN_HOLD_MS = 2 * 60 * 1000; // Reduced from 8m to 2m for faster exits
   const AUTOPILOT_MAX_TRADES_PER_DAY = 500;
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.55;
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.45;
   const AUTOPILOT_MIN_ATR_PCT = 0.02;
   const AUTOPILOT_MAX_CHOP_SCORE = 0.6;
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 2;
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 1;
   const AUTOPILOT_POST_LOSS_COOLDOWN_MS = 15 * 60 * 1000;
   const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
@@ -1382,8 +1382,10 @@ export default function MarketTerminal() {
   }, []);
 
   const getEstimatedCostBps = useCallback((sym: string) => {
-    // Use a conservative cost estimate so the bot only trades when edge is strong.
-    return 12;
+    // Standard liquid stocks have low slippage on Alpaca.
+    // Lowering to 6 bps for stocks and 30 for crypto to allow more trade activity.
+    if (isCryptoSymbol(sym)) return 30;
+    return 6;
   }, []);
 
   // Calculate autopilot trade quantity based on portfolio exposure, symbol price, and trend strength
@@ -3362,7 +3364,7 @@ export default function MarketTerminal() {
           : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(2));
 
         const stat = autopilotMarketStatsRef.current[targetSymbol];
-        const directionalTrendThreshold = Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.5);
+        const directionalTrendThreshold = Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.4);
         const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
         const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
         const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps));
@@ -3401,7 +3403,7 @@ export default function MarketTerminal() {
             const sig = computeSignalConfidence(stat);
             const adjQty = computeAdaptiveQty(seedQtyLong, sig.confidence, targetSymbol);
             const reasonLabel = shouldFallbackBuy ? "fallback" : "signal";
-            addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence*100)}% confidence. Using qty ${adjQty} via ${reasonLabel} entry.`, "info");
+            addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence * 100)}% confidence. Using qty ${adjQty} via ${reasonLabel} entry.`, "info");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", adjQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
             if (orderOutcome.status === "BLOCKED" && orderOutcome.code === "BLOCKED_MAX_CONCURRENT") {
@@ -3425,7 +3427,7 @@ export default function MarketTerminal() {
             }
             const sig = computeSignalConfidence(stat);
             const adjQty = computeAdaptiveQty(seedQtyShort, sig.confidence, targetSymbol);
-            addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence*100)}% confidence. Using qty ${adjQty}.`, "info");
+            addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence * 100)}% confidence. Using qty ${adjQty}.`, "info");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", adjQty);
             // If broker rejects due to borrow/unavailability, record timestamp for throttling
             if (orderOutcome.status === "REJECTED" && orderOutcome.message && /borrow|short|unable to short|not allowed to short/i.test(orderOutcome.message)) {
@@ -3433,7 +3435,13 @@ export default function MarketTerminal() {
             }
             logScanOrderOutcome("SCALPER", orderOutcome);
           } else {
-            addAutopilotLog(`Skipped scalper entry for ${targetSymbol}: no clear long/short edge.`, "info");
+            // Log weak signals so the user knows the scanner is evaluating but filtering
+            if (hasMatureSignal && (stat.expectedEdgeBps > 0 || stat.trendStrength > 0)) {
+              // Only log if it's somewhat interesting to avoid spamming 300 logs
+              if (stat.expectedEdgeBps > 3 || stat.trendStrength > 0.3) {
+                addAutopilotLog(`Filtering ${targetSymbol}: Signal too weak (${Math.round(stat.expectedEdgeBps)} bps edge, ${stat.trendStrength.toFixed(2)} trend).`, "info");
+              }
+            }
           }
           continue;
         }
