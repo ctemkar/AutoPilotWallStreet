@@ -116,7 +116,7 @@ Make your decision tactical and realistic.`;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
           response = await ai.models.generateContent({
-            model: "gemini-3.5-flash",
+            model: "gemini-1.5-flash",
             contents: prompt,
             config: {
               responseMimeType: "application/json",
@@ -143,7 +143,21 @@ Make your decision tactical and realistic.`;
           break; // Success, break out of retry loop
         } catch (apiErr: any) {
           lastError = apiErr;
-          console.warn(`Gemini Autopilot connection attempt ${attempt}/3 failed: ${apiErr?.message || apiErr}`);
+          const errorMsg = apiErr?.message || String(apiErr);
+          console.warn(`Gemini Autopilot connection attempt ${attempt}/3 failed: ${errorMsg}`);
+          
+          if (errorMsg.includes("leaked")) {
+            // No point in retrying if the key is leaked
+            return NextResponse.json({ 
+              error: "GEMINI_API_KEY leaked. Please update .env.local with a fresh key from aistudio.google.com.",
+              leaked: true,
+              sandbox: true,
+              action: "HOLD",
+              qty: 0,
+              reason: "Security: API Key reported as leaked by Google. Trading paused."
+            });
+          }
+
           if (attempt < 3) {
             // exponential backoff
             await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));

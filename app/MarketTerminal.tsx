@@ -704,7 +704,7 @@ export default function MarketTerminal() {
     lastCandleAction: string;
   }>>({});
 
-  const [autopilotInterval, setAutopilotInterval] = useState(15); // default to 15s between scans
+  const [autopilotInterval, setAutopilotInterval] = useState(60); // default to 60s to prevent Alpaca 429 errors
   const [autopilotFailurePauseSeconds, setAutopilotFailurePauseSeconds] = useState(120);
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
@@ -723,7 +723,7 @@ export default function MarketTerminal() {
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(70); // percent of portfolio per symbol
   const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(20000); // absolute dollar cap per symbol
-  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(4); // concurrent open positions
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(60); // increased from 4 to 60 to allow resumption with 50 existing positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum live order size
@@ -734,10 +734,11 @@ export default function MarketTerminal() {
   const AUTOPILOT_MIN_HOLD_MS = 2 * 60 * 1000; // Reduced from 8m to 2m for faster exits
   const AUTOPILOT_MAX_TRADES_PER_DAY = 500;
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.45;
+  const AUTOPILOT_DAILY_PROFIT_GOAL_USD = 150; // New: stop taking new trades if 1.5% profit is reached (assuming ~$10k balance)
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.50; // Safe: slightly higher hurdle for quality
   const AUTOPILOT_MIN_ATR_PCT = 0.02;
-  const AUTOPILOT_MAX_CHOP_SCORE = 0.6;
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 1;
+  const AUTOPILOT_MAX_CHOP_SCORE = 0.55; // Safe: lower chop tolerance (was 0.6)
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 2; // Safe: restored to 2 bps to ensure slippage is covered
   const AUTOPILOT_POST_LOSS_COOLDOWN_MS = 15 * 60 * 1000;
   const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
@@ -1166,13 +1167,24 @@ export default function MarketTerminal() {
   }, [addAutopilotLog]);
 
   // --- Adaptive sizing controller ---
-  const computeAdaptiveQty = useCallback((baseQty: number, confidence: number, symbol?: string) => {
-    const minQty = symbol === "BTCUSD" ? 0.0001 : 0.01;
+  const computeAdaptiveQty = useCallback((baseQty: number, confidence: number, symbol?: string, side?: "BUY" | "SELL") => {
+    const isCrypto = symbol === "BTCUSD" || (symbol ? isCryptoSymbol(symbol) : false);
+    const minQty = isCrypto ? 0.0001 : 0.01;
     // Keep sizing close to the target allocation even on moderate-confidence setups.
     const scale = 0.9 + 0.1 * Math.max(0, Math.min(1, confidence));
-    const raw = Math.max(minQty, baseQty * scale);
+    let raw = Math.max(minQty, baseQty * scale);
+
+    // Alpaca rejection: fractional orders cannot be sold short for equities
+    if (!isCrypto && side === "SELL") {
+      raw = Math.floor(raw);
+      // Ensure at least 1 share for shorting if we intended to trade
+      if (raw < 1 && baseQty >= 0.1) {
+        raw = 1;
+      }
+    }
+    
     // Round appropriately for BTC vs equities
-    return symbol === "BTCUSD" ? parseFloat(raw.toFixed(4)) : parseFloat(raw.toFixed(2));
+    return isCrypto ? parseFloat(raw.toFixed(4)) : parseFloat(raw.toFixed(2));
   }, []);
 
   // --- Borrow health guard: proactive check shortability via Alpaca account proxy ---
@@ -1866,6 +1878,18 @@ export default function MarketTerminal() {
         };
       }
 
+      if (dayGuard.realizedPnl >= AUTOPILOT_DAILY_PROFIT_GOAL_USD) {
+        return {
+          status: "BLOCKED",
+          code: "BLOCKED_DAILY_PROFIT_GOAL",
+          symbol: symbolClean,
+          side,
+          requestedQty: qtyNum,
+          executedQty: 0,
+          message: `Daily profit goal reached ($${dayGuard.realizedPnl.toFixed(2)}). Taking the rest of the day off!`
+        };
+      }
+
       if (dayGuard.realizedPnl < 0) {
         const postLossPause = autopilotPostLossPauseRef.current;
         if (postLossPause.dayKey !== dayGuard.dayKey) {
@@ -2374,9 +2398,16 @@ export default function MarketTerminal() {
           };
 
           if (side === "BUY") {
-            const notionalUsd = parseFloat((finalQty * liveEstimatedPrice).toFixed(2));
-            equityOrderPayload.notional = notionalUsd;
-            try { console.debug(`[AUTOPILOT][DEBUG] sending equity BUY as notional=${notionalUsd} USD for ${symbolClean} (finalQty=${finalQty}, estPrice=${liveEstimatedPrice})`); } catch (e) {}
+            const currentSession = getMarketSessionET();
+            // Forced QTY mode for Extended session to satisfy Alpaca Limit-Order requirements
+            if (currentSession === "EXTENDED") {
+              equityOrderPayload.qty = parseFloat(finalQty.toFixed(2));
+              try { console.debug(`[AUTOPILOT][DEBUG] sending equity BUY as qty=${equityOrderPayload.qty} (EXTENDED session) for ${symbolClean} (finalQty=${finalQty}, estPrice=${liveEstimatedPrice})`); } catch (e) {}
+            } else {
+              const notionalUsd = parseFloat((finalQty * liveEstimatedPrice).toFixed(2));
+              equityOrderPayload.notional = notionalUsd;
+              try { console.debug(`[AUTOPILOT][DEBUG] sending equity BUY as notional=${notionalUsd} USD for ${symbolClean} (finalQty=${finalQty}, estPrice=${liveEstimatedPrice})`); } catch (e) {}
+            }
           } else {
             const ownedQty = Math.max(0, parseFloat(String(existingPositionBeforeOrder?.qty || 0)));
             const sellQty = ownedQty > 0 ? Math.min(finalQty, ownedQty) : finalQty;
@@ -3368,6 +3399,17 @@ export default function MarketTerminal() {
         const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
         const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
         const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps));
+
+        // Extended Hours Guard: Liquidity is lower, so only trade on "Very Strong" signals.
+        const currentSession = getMarketSessionET();
+        const isExtended = currentSession === "EXTENDED";
+        const isVeryStrong = !!stat && Math.abs(stat.trendStrength) >= 0.7 && Math.abs(stat.expectedEdgeBps) >= 15;
+        const sessionAllowsEntry = !isExtended || isVeryStrong;
+
+        if (isExtended && !isVeryStrong && (hasStrongLongEdge || (!!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + 2)))) {
+          addAutopilotLog(`Filtering ${targetSymbol}: Extended hours requires 'Very Strong' signal (Trend > 0.7, Edge > 15bps). Current: Trend ${stat?.trendStrength?.toFixed(2)}, Edge ${stat?.expectedEdgeBps?.toFixed(1)}bps.`, "info");
+        }
+
         // Fixed: Falling back to BUY when no signal is present or trend is weak is dangerous in a bear market.
         // Forcing shouldFallbackBuy to false to ensure we only trade on verified signals.
         const shouldFallbackBuy = false;
@@ -3390,7 +3432,7 @@ export default function MarketTerminal() {
           const hasStrongShortEdge = !!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS);
           const strongDownTrend = !!stat && stat.trendStrength <= -directionalTrendThreshold;
 
-          if ((hasStrongLongEdge && strongUpTrend && seedQtyLong > 0) || shouldFallbackBuy) {
+          if ((hasStrongLongEdge && strongUpTrend && seedQtyLong > 0 && sessionAllowsEntry) || shouldFallbackBuy) {
             const positionsSnapshot = (curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions) || [];
             const pendingCountForEntry = autopilotPendingBuySymbolsRef.current.size;
             if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", positionsSnapshot, pendingCountForEntry)) {
@@ -3401,7 +3443,7 @@ export default function MarketTerminal() {
             }
             // compute confidence and adapt sizing
             const sig = computeSignalConfidence(stat);
-            const adjQty = computeAdaptiveQty(seedQtyLong, sig.confidence, targetSymbol);
+            const adjQty = computeAdaptiveQty(seedQtyLong, sig.confidence, targetSymbol, "BUY");
             const reasonLabel = shouldFallbackBuy ? "fallback" : "signal";
             addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence * 100)}% confidence. Using qty ${adjQty} via ${reasonLabel} entry.`, "info");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", adjQty);
@@ -3416,7 +3458,7 @@ export default function MarketTerminal() {
                 break;
               }
             }
-          } else if (hasStrongShortEdge && strongDownTrend && seedQtyShort > 0) {
+          } else if (hasStrongShortEdge && strongDownTrend && seedQtyShort > 0 && sessionAllowsEntry) {
             // Attempt a short-entry SELL when a clear downtrend + negative edge exists
             // Proactively check shortability where possible
             const shortable = await checkShortability(curRef.isPaper);
@@ -3426,7 +3468,7 @@ export default function MarketTerminal() {
               continue;
             }
             const sig = computeSignalConfidence(stat);
-            const adjQty = computeAdaptiveQty(seedQtyShort, sig.confidence, targetSymbol);
+            const adjQty = computeAdaptiveQty(seedQtyShort, sig.confidence, targetSymbol, "SELL");
             addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence * 100)}% confidence. Using qty ${adjQty}.`, "info");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", adjQty);
             // If broker rejects due to borrow/unavailability, record timestamp for throttling
@@ -3449,31 +3491,37 @@ export default function MarketTerminal() {
         // Deterministic exits: if a live position breaches global TP/SL bounds, exit first.
         const existingQty = existingScalperPos.qty;
         const existingEntry = Number(existingScalperPos.avg_entry_price || 0);
-        if (existingQty > 0 && existingEntry > 0) {
-          // Fixed: Reduced absolute stop from $25 to $10 to prevent large drawdowns
-          const ABSOLUTE_DOLLAR_STOP = 10; // dollars
+        
+        if (existingQty !== 0 && existingEntry > 0) {
+          const isShort = existingQty < 0;
+          const ABSOLUTE_DOLLAR_STOP = 7; // dollars 
+          
           try {
-            const unrealizedDollar = (currentSpotPrice - existingEntry) * existingQty;
+            // For shorts, unrealized profit = (entry - price) * |qty|
+            // For longs, unrealized profit = (price - entry) * qty
+            const unrealizedDollar = isShort 
+              ? (existingEntry - currentSpotPrice) * Math.abs(existingQty)
+              : (currentSpotPrice - existingEntry) * existingQty;
+
             if (unrealizedDollar <= -ABSOLUTE_DOLLAR_STOP) {
-              addAutopilotLog(`🛑 Absolute $${ABSOLUTE_DOLLAR_STOP} stop-loss breached: ${targetSymbol} unrealized ${unrealizedDollar.toFixed(2)}. Forcing exit.`, "warn");
-              const sellQtyForce = existingQty;
-              const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQtyForce);
+              addAutopilotLog(`🛑 Absolute $${ABSOLUTE_DOLLAR_STOP} stop-loss breached: ${targetSymbol} (${isShort ? 'SHORT' : 'LONG'}) unrealized ${unrealizedDollar.toFixed(2)}. Forcing exit.`, "warn");
+              const orderOutcome = await executeAutopilotOrder(targetSymbol, isShort ? "BUY" : "SELL", Math.abs(existingQty));
               logScanOrderOutcome("ABS_DOLLAR_SL", orderOutcome);
               continue;
             }
-          } catch (e) {
-            // ignore diagnostic failures here
-          }
-          const pnlPct = ((currentSpotPrice - existingEntry) / existingEntry) * 100;
-          const tpPct = Number(curRef.globalTakeProfitPercent || 15);
-          const slPct = Number(curRef.globalStopLossPercent || 5);
+          } catch (e) { /* ignore */ }
+
+          const pnlPct = isShort
+            ? ((existingEntry - currentSpotPrice) / existingEntry) * 100
+            : ((currentSpotPrice - existingEntry) / existingEntry) * 100;
+            
+          const tpPct = Number(curRef.globalTakeProfitPercent || 1.2);
+          const slPct = Number(curRef.globalStopLossPercent || 0.8);
 
           if (pnlPct >= tpPct || pnlPct <= -slPct) {
-            const baseQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
-            const sellQty = Math.min(existingQty, baseQty);
             const triggerLabel = pnlPct >= tpPct ? "TP" : "SL";
-            addAutopilotLog(`Scalper ${triggerLabel} exit: ${targetSymbol} at ${pnlPct.toFixed(2)}% (entry ${existingEntry.toFixed(2)} -> now ${currentSpotPrice.toFixed(2)}). Attempting SELL ${sellQty}.`, "trade");
-            const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
+            addAutopilotLog(`Scalper ${triggerLabel} exit: ${targetSymbol} (${isShort ? 'SHORT' : 'LONG'}) at ${pnlPct.toFixed(2)}% (entry ${existingEntry.toFixed(2)} -> now ${currentSpotPrice.toFixed(2)}).`, "trade");
+            const orderOutcome = await executeAutopilotOrder(targetSymbol, isShort ? "BUY" : "SELL", Math.abs(existingQty));
             logScanOrderOutcome("SCALPER", orderOutcome);
             continue;
           }
@@ -3656,8 +3704,9 @@ export default function MarketTerminal() {
                   : (entry - currentSpotPrice) * (getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0);
                 if (unrealizedDollarCheck <= -ABSOLUTE_DOLLAR_STOP) {
                   addAutopilotLog(`🛑 Absolute $${ABSOLUTE_DOLLAR_STOP} stop-loss breached (Touch&Turn): ${targetSymbol} unrealized ${unrealizedDollarCheck.toFixed(2)}. Forcing exit.`, "warn");
-                  const sellQtyForce = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0;
-                  const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQtyForce);
+                  const tradeQtyForce = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive) || 0;
+                  const exitSide = tState.side === "BUY" ? "SELL" : "BUY";
+                  const orderOutcome = await executeAutopilotOrder(targetSymbol, exitSide, tradeQtyForce);
                   logScanOrderOutcome("ABS_DOLLAR_SL", orderOutcome);
                   stateChange = "HIT_STOP";
                 }
@@ -4412,7 +4461,7 @@ export default function MarketTerminal() {
       // create a single stable interval that uses the latest scan function via a lightweight wrapper
       autopilotIntervalHandleRef.current = setInterval(() => {
         executeAutopilotScan();
-      }, Math.max(autopilotInterval, 5) * 1000);
+      }, Math.max(autopilotInterval, 30) * 1000);
     }
 
     return () => {
@@ -5672,8 +5721,13 @@ if __name__ == "__main__":
       addLog("GEMINI", "DIAGNOSE_SUCCESS", "AI Stress diagnosis compiled successfully.", "SUCCESS");
     } catch (err: any) {
       console.error(err);
-      setAiAnalysis("### 🔴 Diagnostic Failed\nUnable to retrieve portfolio diagnosis from AI server. Please make sure the backend is active.");
-      addLog("GEMINI", "DIAGNOSE_ERROR", err.message || "Model computation timed out.", "CRITICAL");
+      const msg = err.message || "Model computation timed out.";
+      if (msg.includes("leaked")) {
+        setAiAnalysis(`### 🔐 GEMINI_API_KEY Leaked\n\nGoogle has disabled your API key because it was detected in a public location (likely a leaked secret). \n\n**Action Required:**\n1. Go to [AI Studio](https://aistudio.google.com/)\n2. Generate a **NEW API Key**.\n3. Update the \`GEMINI_API_KEY\` entry in your \`.env.local\` file.\n4. Save and the diagnostics will resume working.`);
+      } else {
+        setAiAnalysis(`### 🔴 Diagnostic Failed\n\n${msg}\n\nPlease check server logs for more details.`);
+      }
+      addLog("GEMINI", "DIAGNOSE_ERROR", msg, "CRITICAL");
     } finally {
       setIsAiLoading(false);
     }

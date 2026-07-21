@@ -83,15 +83,46 @@ Requirements:
 6. Keep the tone professional, practical, and direct.
 7. Do not mention that you are an AI or use generic filler. Use precise language and numbers where possible.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-    });
+    let response: any = null;
+    let lastError: any = null;
 
-    return NextResponse.json({
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        response = await ai.models.generateContent({
+          model: "gemini-1.5-flash",
+          contents: prompt,
+        });
+        break; // Success
+      } catch (apiErr: any) {
+        lastError = apiErr;
+        const errorMsg = apiErr?.message || String(apiErr);
+        console.warn(`Gemini Analyze connection attempt ${attempt}/3 failed: ${errorMsg}`);
+        
+        if (errorMsg.includes("leaked")) {
+          return NextResponse.json({ 
+            error: "Your GEMINI_API_KEY has been reported as leaked by Google/AI Studio. For security, Google has disabled this key. Please generate a new key at https://aistudio.google.com/ and update your .env.local file.",
+            leaked: true
+          });
+        }
+        
+        if (attempt < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        }
+      }
+    }
+
+    if (!response) {
+      throw lastError || new Error("Failed to generate content after 3 attempts");
+    }
+
+    const result = {
       diagnosis: response.text || "No diagnostics return received from AI model.",
       sandbox: false,
-    });
+    };
+    console.log("--- AI DIAGNOSIS START ---");
+    console.log(result.diagnosis);
+    console.log("--- AI DIAGNOSIS END ---");
+    return NextResponse.json(result);
   } catch (error: any) {
     const errorMessage = error?.message || error?.toString() || "Unknown API Error";
     const isQuota = errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("RESOURCE_EXHAUSTED");

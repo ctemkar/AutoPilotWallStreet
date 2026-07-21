@@ -29,35 +29,27 @@ function resolveAlpacaCredentials(body: any) {
   const { isPaper } = body || {};
   const apiKey = body?.apiKey
     || (isPaper
-      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_LIVE_API_KEY
-      : process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_PAPER_API_KEY)
+      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_LIVE_API_KEY
+      : process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY)
     || "";
   const apiSecret = body?.apiSecret
     || (isPaper
-      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_LIVE_API_SECRET
-      : process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_PAPER_API_SECRET)
+      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_LIVE_API_SECRET
+      : process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET)
     || "";
   const source = body?.apiKey
     ? "request"
     : isPaper
       ? process.env.ALPACA_PAPER_API_KEY
         ? "ALPACA_PAPER_API_KEY"
-        : process.env.ALPACA_API_KEY
-          ? "ALPACA_API_KEY"
-          : process.env.ALPACA_KEY
-            ? "ALPACA_KEY"
-            : process.env.ALPACA_LIVE_API_KEY
-              ? "ALPACA_LIVE_API_KEY"
-              : "none"
-      : process.env.ALPACA_KEY
-        ? "ALPACA_KEY"
-        : process.env.ALPACA_LIVE_API_KEY
-          ? "ALPACA_LIVE_API_KEY"
+        : process.env.ALPACA_PAPER_KEY
+          ? "ALPACA_PAPER_KEY"
           : process.env.ALPACA_API_KEY
             ? "ALPACA_API_KEY"
-            : process.env.ALPACA_PAPER_API_KEY
-              ? "ALPACA_PAPER_API_KEY"
-              : "none";
+            : "none"
+      : process.env.ALPACA_KEY
+        ? "ALPACA_KEY"
+        : "none";
   return { apiKey, apiSecret, isPaper: !!isPaper, source };
 }
 
