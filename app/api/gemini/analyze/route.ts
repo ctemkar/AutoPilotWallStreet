@@ -88,8 +88,9 @@ Requirements:
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        // Force the precise model name for Gemini 1.5 Flash in AI Studio / API
         response = await ai.models.generateContent({
-          model: "gemini-1.5-flash-latest",
+          model: "gemini-1.5-flash-8b", 
           contents: prompt,
         });
         break; // Success
