@@ -2343,6 +2343,22 @@ export default function MarketTerminal() {
       addLog("AUTOPILOT", side, `Transmitting Bot Order: ${side} ${finalQty} shares of ${symbolClean}`, "INFO");
       const release = await orderMutexRef.current.acquire();
       try {
+        // Step 1: Pre-fetch fresh positions state to handle fractional mismatch cleanly
+        let existingPositionBeforeOrder: any = null;
+        try {
+          const freshPos = await fetchPositions();
+          // Improved: match symbol more robustly (handle crypto slash format vs raw symbol)
+          existingPositionBeforeOrder = freshPos.find((p: any) => 
+            p.symbol === symbolClean || 
+            p.symbol === symbolClean.replace("/", "") ||
+            p.symbol === normalizeSymbol(symbolClean)
+          );
+        } catch (e) {
+          console.warn("[AUTOPILOT] Failed to pre-fetch fresh positions, falling back to cached state.");
+          const activePositionsForFallback = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
+          existingPositionBeforeOrder = activePositionsForFallback.find((p: any) => p.symbol === symbolClean);
+        }
+
         let response;
         // If this is a crypto symbol, route to Binance proxy for live execution
         if (isCryptoSymbol(symbolClean)) {
@@ -2449,15 +2465,27 @@ export default function MarketTerminal() {
 
           if (side === "BUY") {
             const currentSession = getMarketSessionET();
-            // Forced QTY mode for Extended session to satisfy Alpaca Limit-Order requirements
-            if (currentSession === "EXTENDED") {
-              equityOrderPayload.qty = parseFloat(finalQty.toFixed(2));
-              try { console.debug(`[AUTOPILOT][DEBUG] sending equity BUY as qty=${equityOrderPayload.qty} (EXTENDED session) for ${symbolClean} (finalQty=${finalQty}, estPrice=${liveEstimatedPrice})`); } catch (e) {}
-            } else {
-              const notionalUsd = parseFloat((finalQty * liveEstimatedPrice).toFixed(2));
-              equityOrderPayload.notional = notionalUsd;
-              try { console.debug(`[AUTOPILOT][DEBUG] sending equity BUY as notional=${notionalUsd} USD for ${symbolClean} (finalQty=${finalQty}, estPrice=${liveEstimatedPrice})`); } catch (e) {}
+            // Applying a strictly conservative 4-decimal floor to QTY for consistency across brokers.
+            const finalQtySafe = Math.floor(finalQty * 10000) / 10000;
+            if (finalQtySafe <= 0) {
+              addAutopilotLog(`Skipping BUY ${symbolClean}: quantity ${finalQty} is below minimum increment (0.0001).`, "warn");
+              release();
+              return { status: "INVALID", code: "INVALID_QTY", symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: "Buy quantity too small" };
             }
+            equityOrderPayload.qty = finalQtySafe;
+
+            // Use notional only for standard market hours if desired, but qty is generally safer for fractions.
+            if (currentSession === "EXTENDED") {
+              try { console.debug(`[AUTOPILOT][DEBUG] sending equity BUY as qty=${equityOrderPayload.qty} (EXTENDED session) for ${symbolClean} (finalQty=${finalQty})`); } catch (e) {}
+            } else {
+              // Even in standard hours, we use qty to avoid fractional precision errors on the notional->qty calculation
+              try { console.debug(`[AUTOPILOT][DEBUG] sending equity BUY as qty=${equityOrderPayload.qty} for ${symbolClean} (finalQty=${finalQty})`); } catch (e) {}
+            }
+            response = await fetch("/api/alpaca/trade", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(equityOrderPayload),
+            });
           } else {
             const ownedQty = Math.max(0, parseFloat(String(existingPositionBeforeOrder?.qty || 0)));
             // Fixed: Precision mismatch in fractional sell orders can cause Alpaca 403 (Insufficient Qty).
@@ -2467,9 +2495,12 @@ export default function MarketTerminal() {
             const sellQtyRaw = (ownedQty > 0 && side === "SELL") ? Math.min(finalQty, ownedQty) : finalQty;
             
             // Check if what we want to sell is effectively the whole position or too small to trade
-            if (ownedQty > 0 && (sellQtyRaw >= ownedQty - 0.0001 || ownedQty < 0.0001)) {
+            const isFullPosition = ownedQty > 0 && sellQtyRaw >= (ownedQty - 0.0001);
+            const isDust = ownedQty > 0 && ownedQty < 0.0001;
+
+            if (isFullPosition || isDust) {
               // Switch to the liquidation helper for closing full positions or dust
-              try { console.debug(`[AUTOPILOT][DEBUG] switching to LIQUIDATE for position close/dust of ${symbolClean} (ownedQty=${ownedQty})`); } catch (e) {}
+              try { console.debug(`[AUTOPILOT][DEBUG] switching to LIQUIDATE for ${symbolClean}. Reason: ${isDust ? 'DUST' : 'FULL_CLOSE'} (ownedQty=${ownedQty}, sellQtyRaw=${sellQtyRaw})`); } catch (e) {}
               response = await fetch("/api/alpaca/liquidate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -2479,25 +2510,34 @@ export default function MarketTerminal() {
               const sellQtyFloored = Math.floor(sellQtyRaw * 10000) / 10000;
               if (sellQtyFloored <= 0) {
                 // Return a fake result to stop the loop for this symbol
-                addAutopilotLog(`Skipping SELL ${symbolClean}: quantity ${sellQtyRaw.toFixed(6)} is below fractional floor (0.0001).`, "warn");
-                release(); // Must release mutex!
-                return {
-                  status: "INVALID",
-                  code: "INVALID_QTY",
-                  symbol: symbolClean,
-                  side,
-                  requestedQty: qtyNum,
-                  executedQty: 0,
-                  message: `Sell quantity ${sellQtyRaw.toFixed(6)} is too small to execute.`
-                };
+                addAutopilotLog(`Skipping SELL ${symbolClean}: quantity ${sellQtyRaw.toFixed(6)} is below fractional floor (0.0001). Attempting liquidation...`, "warn");
+                if (ownedQty > 0) {
+                  response = await fetch("/api/alpaca/liquidate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(getBrokerAuthPayload({ symbol: symbolClean })),
+                   });
+                } else {
+                  release(); // Must release mutex!
+                  return {
+                    status: "INVALID",
+                    code: "INVALID_QTY",
+                    symbol: symbolClean,
+                    side,
+                    requestedQty: qtyNum,
+                    executedQty: 0,
+                    message: `Sell quantity ${sellQtyRaw.toFixed(6)} is too small and no position found.`
+                  };
+                }
+              } else {
+                equityOrderPayload.qty = sellQtyFloored;
+                try { console.debug(`[AUTOPILOT][DEBUG] sending equity SELL as qty=${equityOrderPayload.qty} for ${symbolClean} (ownedQty=${ownedQty}, finalQty=${finalQty})`); } catch (e) {}
+                response = await fetch("/api/alpaca/trade", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(equityOrderPayload),
+                });
               }
-              equityOrderPayload.qty = sellQtyFloored;
-              try { console.debug(`[AUTOPILOT][DEBUG] sending equity SELL as qty=${equityOrderPayload.qty} for ${symbolClean} (ownedQty=${ownedQty}, finalQty=${finalQty})`); } catch (e) {}
-              response = await fetch("/api/alpaca/trade", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(equityOrderPayload),
-              });
             }
           }
         }
@@ -3367,8 +3407,8 @@ export default function MarketTerminal() {
       }
 
       // In broad-universe mode, process a chunk of the target list each scan cycle.
-      // Capped at 20 to avoid Alpaca rate limits and local server saturation.
-      const DEFAULT_SCAN_BATCH_SIZE = 20;
+      // Capped at 120 to allow full universe coverage as requested by the user.
+      const DEFAULT_SCAN_BATCH_SIZE = 120;
       const maxTargetsPerScan = autopilotScanBroadUniverse 
         ? Math.min(scanTargets.length, DEFAULT_SCAN_BATCH_SIZE) 
         : 1;
@@ -3380,6 +3420,9 @@ export default function MarketTerminal() {
         }
       }
       const processedScanTargets = orderedScanTargets.slice(0, Math.max(1, Math.min(orderedScanTargets.length, maxTargetsPerScan)));
+      
+      // Update the rotation index by the number of processed targets to ensure fresh symbols in the next cycle.
+      autopilotTargetSymbolIndexRef.current = (targetIdx + processedScanTargets.length) % scanTargets.length;
 
       for (const targetSymbol of processedScanTargets) {
         const iterationRef = stateRef.current;

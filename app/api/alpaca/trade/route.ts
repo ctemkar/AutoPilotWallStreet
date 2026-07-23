@@ -93,14 +93,22 @@ export async function POST(req: Request) {
       payload.notional = notional.toString();
     } else {
       let finalQty = parseFloat(qty);
+      if (Number.isNaN(finalQty)) {
+        return NextResponse.json(
+          { error: `Invalid quantity received: ${qty}.` },
+          { status: 400 }
+        );
+      }
+
       // Alpaca strictly rejects SELL orders if the decimal count exceeds available balance.
       // We apply a universal 4-decimal floor to prevent these fractional dust errors.
       if (side === "sell") {
+        const originalQty = finalQty;
         finalQty = Math.floor(finalQty * 10000) / 10000;
-        console.log(`[ALPACA_SAFETY] Floored ${symbol} SELL qty from ${qty} to ${finalQty}`);
+        console.log(`[ALPACA_SAFETY] Floored ${symbol} SELL qty from ${originalQty} to ${finalQty}`);
         if (finalQty <= 0) {
           return NextResponse.json(
-            { error: `Sell quantity ${qty} is too small after rounding to 4 decimals. Alpaca requires qty > 0.` },
+            { error: `Rejected: SELL quantity ${originalQty} floored to zero (min 0.0001). Use liquidate to clear tiny dust.` },
             { status: 422 }
           );
         }
