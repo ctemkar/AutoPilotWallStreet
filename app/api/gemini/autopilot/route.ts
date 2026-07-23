@@ -71,12 +71,29 @@ export async function POST(req: Request) {
     }
 
     try {
-      // Initialize @google/genai client
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build",
+      // Initialize modern @google/genai client
+      const genAI = new GoogleGenAI(apiKey);
+      const model = genAI.getGenerativeModel({
+        model: "gemini-1.5-flash",
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              action: {
+                type: Type.STRING,
+                description: "Tactical action to execute. Options: BUY, SELL, HOLD",
+              },
+              qty: {
+                type: Type.NUMBER,
+                description: "Quantity of shares to trade, e.g., default between 1 and 15",
+              },
+              reason: {
+                type: Type.STRING,
+                description: "Strategic reason text for executing this trade.",
+              },
+            },
+            required: ["action", "qty", "reason"],
           },
         },
       });
@@ -110,51 +127,29 @@ Decide exactly what the Autopilot bot should do. You must return your decision i
 
 Make your decision tactical and realistic.`;
 
-      let response: any = null;
+      let responseText = "";
       let lastError: any = null;
 
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          response = await ai.models.generateContent({
-            model: "gemini-1.5-flash",
-            contents: prompt,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  action: {
-                    type: Type.STRING,
-                    description: "Tactical action to execute. Options: BUY, SELL, HOLD",
-                  },
-                  qty: {
-                    type: Type.NUMBER,
-                    description: "Quantity of shares to trade, e.g., default between 1 and 15",
-                  },
-                  reason: {
-                    type: Type.STRING,
-                    description: "Strategic reason text for executing this trade.",
-                  },
-                },
-                required: ["action", "qty", "reason"],
-              },
-            },
-          });
-          break; // Success, break out of retry loop
+          const result = await model.generateContent(prompt);
+          const response = await result.response;
+          responseText = response.text();
+          if (responseText) break;
         } catch (apiErr: any) {
           lastError = apiErr;
           const errorMsg = apiErr?.message || String(apiErr);
           console.warn(`Gemini Autopilot connection attempt ${attempt}/3 failed: ${errorMsg}`);
           
-          if (errorMsg.includes("leaked")) {
+          if (errorMsg.includes("leaked") || errorMsg.includes("API_KEY_INVALID")) {
             // No point in retrying if the key is leaked
             return NextResponse.json({ 
-              error: "GEMINI_API_KEY leaked. Please update .env.local with a fresh key from aistudio.google.com.",
+              error: "GEMINI_API_KEY leaked or invalid. Please update .env.local with a fresh key from aistudio.google.com.",
               leaked: true,
               sandbox: true,
               action: "HOLD",
               qty: 0,
-              reason: "Security: API Key reported as leaked by Google. Trading paused."
+              reason: "Security: API Key reported as leaked by Google or is invalid. Trading paused."
             });
           }
 
@@ -165,12 +160,11 @@ Make your decision tactical and realistic.`;
         }
       }
 
-      if (!response) {
+      if (!responseText) {
         throw lastError || new Error("Gemini AI API call timed out after multiple attempts under high load.");
       }
 
       try {
-        const responseText = response.text || "{}";
         const decision = JSON.parse(responseText.trim());
         return NextResponse.json({
           action: decision.action || "HOLD",
@@ -179,7 +173,7 @@ Make your decision tactical and realistic.`;
           sandbox: false,
         });
       } catch (parseError) {
-        console.error("Failed to parse Gemini decision json:", response.text, parseError);
+        console.error("Failed to parse Gemini decision json:", responseText, parseError);
         const fallback = getLocalFallbackDecision(targetSymbol, marginCapacityUsed, warnThreshold, "JSON Parse Error");
         return NextResponse.json(fallback);
       }

@@ -50,14 +50,14 @@ export async function POST(req: Request) {
   }
 
   try {
-    // Initialize modern @google/genai client with mandatory telemetry header
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
+    // Initialize modern @google/genai client
+    const genAI = new GoogleGenAI(apiKey);
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-1.5-flash",
+      generationConfig: {
+        maxOutputTokens: 1000,
+        temperature: 0.7,
+      }
     });
 
     const activePositionsStr = Array.isArray(positions) && positions.length > 0
@@ -83,25 +83,23 @@ Requirements:
 6. Keep the tone professional, practical, and direct.
 7. Do not mention that you are an AI or use generic filler. Use precise language and numbers where possible.`;
 
-    let response: any = null;
+    let responseText = "";
     let lastError: any = null;
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        // Force the precise model name for Gemini 1.5 Flash in AI Studio / API
-        response = await ai.models.generateContent({
-          model: "gemini-1.5-flash-8b", 
-          contents: prompt,
-        });
-        break; // Success
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        responseText = response.text();
+        if (responseText) break;
       } catch (apiErr: any) {
         lastError = apiErr;
         const errorMsg = apiErr?.message || String(apiErr);
         console.warn(`Gemini Analyze connection attempt ${attempt}/3 failed: ${errorMsg}`);
         
-        if (errorMsg.includes("leaked")) {
+        if (errorMsg.includes("leaked") || errorMsg.includes("API_KEY_INVALID")) {
           return NextResponse.json({ 
-            error: "Your GEMINI_API_KEY has been reported as leaked by Google/AI Studio. For security, Google has disabled this key. Please generate a new key at https://aistudio.google.com/ and update your .env.local file.",
+            error: "Your GEMINI_API_KEY has been reported as leaked or is invalid. Please generate a new key at https://aistudio.google.com/ and update your .env.local file.",
             leaked: true
           });
         }
@@ -112,18 +110,18 @@ Requirements:
       }
     }
 
-    if (!response) {
+    if (!responseText) {
       throw lastError || new Error("Failed to generate content after 3 attempts");
     }
 
-    const result = {
-      diagnosis: response.text || "No diagnostics return received from AI model.",
+    const resultResult = {
+      diagnosis: responseText || "No diagnostics return received from AI model.",
       sandbox: false,
     };
     console.log("--- AI DIAGNOSIS START ---");
-    console.log(result.diagnosis);
+    console.log(resultResult.diagnosis);
     console.log("--- AI DIAGNOSIS END ---");
-    return NextResponse.json(result);
+    return NextResponse.json(resultResult);
   } catch (error: any) {
     const errorMessage = error?.message || error?.toString() || "Unknown API Error";
     const isQuota = errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("RESOURCE_EXHAUSTED");

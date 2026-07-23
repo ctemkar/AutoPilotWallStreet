@@ -3479,6 +3479,8 @@ export default function MarketTerminal() {
       
       // Update the rotation index by the number of processed targets to ensure fresh symbols in the next cycle.
       autopilotTargetSymbolIndexRef.current = (targetIdx + processedScanTargets.length) % scanTargets.length;
+      
+      addAutopilotLog(`🚀 SCAN START: Processing ${processedScanTargets.length}/${scanTargets.length} symbols in current cycle (Batch: 500).`, "info");
 
       for (const targetSymbol of processedScanTargets) {
         const iterationRef = stateRef.current;
