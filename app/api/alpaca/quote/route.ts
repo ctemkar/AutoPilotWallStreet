@@ -31,21 +31,14 @@ async function fetchJsonWithTimeout(url: string, headers: Record<string, string>
   }
 }
 
-function resolveAlpacaCredentials() {
-  const apiKey =
-    process.env.ALPACA_LIVE_API_KEY ||
-    process.env.ALPACA_API_KEY ||
-    process.env.ALPACA_KEY ||
-    process.env.ALPACA_PAPER_API_KEY ||
-    process.env.ALPACA_PAPER_KEY ||
-    "";
-  const apiSecret =
-    process.env.ALPACA_LIVE_API_SECRET ||
-    process.env.ALPACA_API_SECRET ||
-    process.env.ALPACA_SECRET ||
-    process.env.ALPACA_PAPER_API_SECRET ||
-    process.env.ALPACA_PAPER_SECRET ||
-    "";
+function resolveAlpacaCredentials(isPaper: boolean) {
+  const apiKey = (isPaper
+    ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY
+    : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY) || "";
+
+  const apiSecret = (isPaper
+    ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET
+    : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET) || "";
 
   return { apiKey, apiSecret };
 }
@@ -65,6 +58,7 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const symbolRaw = (searchParams.get("symbol") || "").trim().toUpperCase();
+    const isPaper = searchParams.get("isPaper") === "true";
 
     if (!symbolRaw) {
       return NextResponse.json({ error: "Missing symbol query parameter." }, { status: 200 });
@@ -76,7 +70,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ symbol: symbolRaw, price: cached.price, source: `${cached.source}-cache` });
     }
 
-    const { apiKey, apiSecret } = resolveAlpacaCredentials();
+    const { apiKey, apiSecret } = resolveAlpacaCredentials(isPaper);
 
     const headers = {
       "APCA-API-KEY-ID": apiKey,

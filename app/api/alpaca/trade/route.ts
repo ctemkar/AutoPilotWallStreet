@@ -39,16 +39,17 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { isPaper, symbol, qty, side, notional, estimatedPrice } = body;
-    const apiKey = body.apiKey
-      || (isPaper
-        ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY
-        : process.env.ALPACA_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY)
-      || "";
-    const apiSecret = body.apiSecret
-      || (isPaper
-        ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET
-        : process.env.ALPACA_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET)
-      || "";
+
+    // STRICT CREDENTIAL SEGREGATION: Never allow fallback between Live and Paper.
+    const apiKey = (isPaper
+      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY
+      : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY) || "";
+
+    const apiSecret = (isPaper
+      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET
+      : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET) || "";
+
+    console.log(`[ALPACA_TRADE] symbol=${symbol} side=${side} isPaper=${isPaper} apiKey=${apiKey?.slice(0, 4)}...`);
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
@@ -91,7 +92,14 @@ export async function POST(req: Request) {
     if (hasNotional) {
       payload.notional = notional.toString();
     } else {
-      payload.qty = qty.toString();
+      let finalQty = parseFloat(qty);
+      // Alpaca strictly rejects SELL orders if the decimal count exceeds available balance.
+      // We apply a universal 4-decimal floor to prevent these fractional dust errors.
+      if (side === "sell") {
+        finalQty = Math.floor(finalQty * 10000) / 10000;
+        console.log(`[ALPACA_SAFETY] Floored ${symbol} SELL qty from ${qty} to ${finalQty}`);
+      }
+      payload.qty = finalQty.toString();
     }
 
     const etNow = getEtDate();
@@ -132,7 +140,7 @@ export async function POST(req: Request) {
       console.error("Alpaca order fetch error:", errMsg);
       return NextResponse.json(
         { error: `Alpaca order proxy error: ${errMsg}` },
-        { status: 200 }
+        { status: 500 }
       );
     }
 
@@ -146,17 +154,19 @@ export async function POST(req: Request) {
         parsedErr = null;
       }
       const message = parsedErr?.message || errorText || "Alpaca rejected order.";
+      console.warn(`[ALPACA_TRADE_REJECTED] status=${status} message=${message}`);
       let guidance = "";
       if (status === 401) {
         guidance = " This looks like a 401 Unauthorized from Alpaca — confirm you are using PAPER keys when `isPaper:true` or LIVE keys when `isPaper:false`. Add ALPACA_PAPER_API_KEY/ALPACA_PAPER_API_SECRET for paper testing or set `isPaper:false` to use live keys.";
       }
       return NextResponse.json(
         { error: `Alpaca rejection: ${message}${guidance}` },
-        { status: 200 }
+        { status: 400 }
       );
     }
 
     const orderResponseData = await orderRes.json();
+    console.log(`[ALPACA_TRADE_SUCCESS] symbol=${symbolUpper} id=${orderResponseData.id} status=${orderResponseData.status}`);
     return NextResponse.json({
       ...orderResponseData,
       submission_meta: {

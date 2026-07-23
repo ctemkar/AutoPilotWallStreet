@@ -16,17 +16,15 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { isPaper, symbol } = body;
-    const apiKey = body?.apiKey
-      || (isPaper
-        ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY
-        : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY || process.env.ALPACA_PAPER_API_KEY)
-      || "";
-    const apiSecret = body?.apiSecret
-      || (isPaper
-        ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET
-        : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET || process.env.ALPACA_PAPER_API_SECRET)
-      || "";
+    const { isPaper, symbol, qty } = body;
+    // STRICT CREDENTIAL SEGREGATION: Never allow fallback between Live and Paper.
+    const apiKey = (isPaper
+      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY
+      : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY) || "";
+
+    const apiSecret = (isPaper
+      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET
+      : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET) || "";
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
@@ -49,9 +47,16 @@ export async function POST(req: Request) {
     const symbolClean = typeof symbol === "string" ? symbol.toUpperCase().trim() : "";
     const isSingleClose = !!symbolClean;
 
-    const closeUrl = isSingleClose
+    let closeUrl = isSingleClose
       ? `${baseUrl}/v2/positions/${encodeURIComponent(symbolClean)}`
       : `${baseUrl}/v2/positions`;
+
+    if (isSingleClose && qty) {
+      const q = parseFloat(String(qty));
+      if (Number.isFinite(q) && q > 0) {
+        closeUrl += `?qty=${q}`;
+      }
+    }
 
     let closeRes: Response;
     try {

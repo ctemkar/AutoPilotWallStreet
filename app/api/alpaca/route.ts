@@ -27,17 +27,36 @@ async function fetchWithRetries(url: string, options: RequestInit = {}, retries 
 
 function resolveAlpacaCredentials(body: any) {
   const { isPaper } = body || {};
-  const apiKey = body?.apiKey
+  
+  // Extract provided keys from request body
+  let providedKey = body?.apiKey || "";
+  let providedSecret = body?.apiSecret || "";
+
+  // SAFETY: Validate that provided keys match the intended Paper/Live mode.
+  // Live keys start with AK, Paper keys start with PK.
+  const looksLikeLive = providedKey.startsWith("AK");
+  const looksLikePaper = providedKey.startsWith("PK");
+
+  if (isPaper && looksLikeLive) {
+    providedKey = "";
+    providedSecret = "";
+  } else if (!isPaper && looksLikePaper) {
+    providedKey = "";
+    providedSecret = "";
+  }
+
+  const apiKey = providedKey
     || (isPaper
-      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_LIVE_API_KEY
-      : process.env.ALPACA_KEY || process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY)
+      ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY
+      : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY)
     || "";
-  const apiSecret = body?.apiSecret
+  const apiSecret = providedSecret
     || (isPaper
-      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_LIVE_API_SECRET
-      : process.env.ALPACA_SECRET || process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET)
+      ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET
+      : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET)
     || "";
-  const source = body?.apiKey
+
+  const source = (providedKey && providedKey === body?.apiKey)
     ? "request"
     : isPaper
       ? process.env.ALPACA_PAPER_API_KEY
@@ -57,6 +76,8 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { apiKey, apiSecret, isPaper, source } = resolveAlpacaCredentials(body);
+
+    console.log(`[ALPACA_CONNECT] isPaper=${isPaper} apiKey=${apiKey?.slice(0, 4)}... source=${source}`);
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(

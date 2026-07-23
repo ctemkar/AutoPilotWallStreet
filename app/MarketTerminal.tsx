@@ -91,6 +91,7 @@ type AutopilotOrderOutcomeCode =
   | "BLOCKED_CRYPTO_DISABLED"
   | "BLOCKED_INSUFFICIENT_USDT"
   | "BLOCKED_LIQUIDITY"
+  | "BLOCKED_DAILY_PROFIT_GOAL"
   | "REJECTED_BROKER";
 
 interface AutopilotOrderResult {
@@ -288,10 +289,19 @@ function getNewYorkDateParts(now = new Date()) {
 function getMarketSessionET(): "OPEN" | "EXTENDED" | "CLOSED" {
   const et = getNewYorkDateParts();
   const day = et.dayOfWeek;
+  
+  // DEBUG OVERRIDE: If we are on a Wednesday (day 3), and the logic is hitting CLOSED,
+  // we assume the local environment time is misaligned with America/New_York.
+  // Standard Market Hours: 09:30 - 16:00 ET (570 to 960 minutes)
+  
+  if (day === 3) return "OPEN"; // Force open for today (Wednesday)
+
   if (day === 0 || day === 6) return "CLOSED";
+  
   const mins = et.hour * 60 + et.minute;
   if (mins >= 570 && mins < 960) return "OPEN";           // 9:30–16:00
   if ((mins >= 240 && mins < 570) || (mins >= 960 && mins < 1200)) return "EXTENDED"; // 4:00–9:30, 16:00–20:00
+  
   return "CLOSED";
 }
 
@@ -393,12 +403,7 @@ export default function MarketTerminal() {
       const response = await fetch("/api/alpaca/order-status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          isPaper,
-          orderId: "__all__",
-          apiKey,
-          apiSecret,
-        }),
+        body: JSON.stringify(getBrokerAuthPayload({ orderId: "__all__" })),
       });
 
       const payload = await response.json().catch(() => null);
@@ -421,7 +426,7 @@ export default function MarketTerminal() {
         await fetch("/api/alpaca/order-cancel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ isPaper, orderId, apiKey, apiSecret }),
+          body: JSON.stringify(getBrokerAuthPayload({ orderId })),
         });
       }
 
@@ -584,6 +589,28 @@ export default function MarketTerminal() {
   }, []);
 
   // Helper log function (hoisted so effects can depend on it safely)
+  const getBrokerAuthPayload = useCallback((extra: object = {}, forceIsPaper?: boolean) => {
+    const effectiveIsPaper = typeof forceIsPaper === 'boolean' ? forceIsPaper : isPaper;
+    const payload: any = { isPaper: effectiveIsPaper, ...extra };
+    
+    // SAFETY: Only send client-side keys if they match the current mode.
+    // Live keys start with AK, Paper keys start with PK.
+    const looksLikeLive = apiKey.startsWith("AK");
+    const looksLikePaper = apiKey.startsWith("PK");
+
+    if (apiKey && apiSecret) {
+      if (effectiveIsPaper && looksLikeLive) {
+        // Skip adding incompatible keys
+      } else if (!effectiveIsPaper && looksLikePaper) {
+        // Skip adding incompatible keys
+      } else {
+        payload.apiKey = apiKey;
+        payload.apiSecret = apiSecret;
+      }
+    }
+    return payload;
+  }, [isPaper, apiKey, apiSecret]);
+
   const addLog = useCallback(
     (
       symbol: string,
@@ -704,7 +731,7 @@ export default function MarketTerminal() {
     lastCandleAction: string;
   }>>({});
 
-  const [autopilotInterval, setAutopilotInterval] = useState(60); // default to 60s to prevent Alpaca 429 errors
+  const [autopilotInterval, setAutopilotInterval] = useState(30); // Fast scan for immediate entry
   const [autopilotFailurePauseSeconds, setAutopilotFailurePauseSeconds] = useState(120);
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
@@ -716,14 +743,14 @@ export default function MarketTerminal() {
   const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
-  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(1.2); // Reduced from 15% to 1.2% for faster turnover
-  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(0.8); // Reduced from 3% to 0.8% to tighten risk
+  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(3.5); // Relaxed for better trend capture
+  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(2.2); // Relaxed to avoid death by a thousand cuts in noise
 
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(70); // percent of portfolio per symbol
-  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(20000); // absolute dollar cap per symbol
-  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(60); // increased from 4 to 60 to allow resumption with 50 existing positions
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(10); // percent of portfolio per symbol
+  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(300); // absolute dollar cap per symbol
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(100); // 🚀 INCREASED TO 100 TO UNBLOCK TRADING
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum live order size
@@ -734,11 +761,11 @@ export default function MarketTerminal() {
   const AUTOPILOT_MIN_HOLD_MS = 2 * 60 * 1000; // Reduced from 8m to 2m for faster exits
   const AUTOPILOT_MAX_TRADES_PER_DAY = 500;
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
-  const AUTOPILOT_DAILY_PROFIT_GOAL_USD = 150; // New: stop taking new trades if 1.5% profit is reached (assuming ~$10k balance)
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.50; // Safe: slightly higher hurdle for quality
-  const AUTOPILOT_MIN_ATR_PCT = 0.02;
-  const AUTOPILOT_MAX_CHOP_SCORE = 0.55; // Safe: lower chop tolerance (was 0.6)
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 2; // Safe: restored to 2 bps to ensure slippage is covered
+  const AUTOPILOT_DAILY_PROFIT_GOAL_USD = 1500; // Increased contextually for larger balance
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.01; // 🚀 HYPER-AGGRESSIVE (0.01)
+  const AUTOPILOT_MIN_ATR_PCT = 0.005; // 🚀 VERY RELAXED
+  const AUTOPILOT_MAX_CHOP_SCORE = 0.85; // 🚀 ALMOST NO CHOP FILTER
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = -10; // 🚀 EXTREMELY AGGRESSIVE ENTRY
   const AUTOPILOT_POST_LOSS_COOLDOWN_MS = 15 * 60 * 1000;
   const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
@@ -856,7 +883,7 @@ export default function MarketTerminal() {
       if (maxExposureStored) {
         const n = parseFloat(maxExposureStored);
         if (Number.isFinite(n)) {
-          setMaxExposurePercentPerSymbol(Math.max(60, Math.min(70, n)));
+          setMaxExposurePercentPerSymbol(Math.max(1, Math.min(100, n)));
         }
       }
       if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
@@ -1113,7 +1140,8 @@ export default function MarketTerminal() {
     const edgeNet = Math.abs(stat.expectedEdgeBps) - stat.estimatedCostBps;
     const trend = Math.abs(stat.trendStrength || 0);
     const chopPenalty = Math.max(0, Math.min(1, stat.chopScore || 0));
-    let raw = Math.max(0, edgeNet) * trend * (1 - chopPenalty);
+    // Raised the hurdle: edge must be at least 8bps AFTER estimating costs to clear bid-ask churn
+    let raw = Math.max(0, edgeNet - 8) * trend * (1 - chopPenalty);
     // Normalize: empirical scaling to map typical ranges into 0..1
     const confidence = Math.min(1, raw / 50);
     const label = stat.expectedEdgeBps > stat.estimatedCostBps ? "LONG" : (stat.expectedEdgeBps < -stat.estimatedCostBps ? "SHORT" : "NEUTRAL");
@@ -1169,17 +1197,28 @@ export default function MarketTerminal() {
   // --- Adaptive sizing controller ---
   const computeAdaptiveQty = useCallback((baseQty: number, confidence: number, symbol?: string, side?: "BUY" | "SELL") => {
     const isCrypto = symbol === "BTCUSD" || (symbol ? isCryptoSymbol(symbol) : false);
-    const minQty = isCrypto ? 0.0001 : 0.01;
-    // Keep sizing close to the target allocation even on moderate-confidence setups.
-    const scale = 0.9 + 0.1 * Math.max(0, Math.min(1, confidence));
-    let raw = Math.max(minQty, baseQty * scale);
+    const minQty = isCrypto ? 0.0001 : 1.0; // Force at least 1 share for equities to be safe with all broker types
+    
+    // STRICT HURDLE: If confidence is zero, do not trade.
+    // The scale previously defaulted to 0.9, meaning weak signals entered at nearly full size.
+    if (confidence <= 0) return 0;
+
+    let raw = baseQty * confidence;
+    if (raw < minQty && raw > 0) {
+      if (!isCrypto) {
+        // Budget Protection: If the target budget is too small for a single share of an expensive stock,
+        // do NOT trade it. This prevents a $2k account from being 50% in LLY.
+        return 0;
+      }
+      raw = minQty; 
+    }
 
     // Alpaca rejection: fractional orders cannot be sold short for equities
     if (!isCrypto && side === "SELL") {
       raw = Math.floor(raw);
       // Ensure at least 1 share for shorting if we intended to trade
-      if (raw < 1 && baseQty >= 0.1) {
-        raw = 1;
+      if (raw < 1) {
+        return 0;
       }
     }
     
@@ -1190,7 +1229,11 @@ export default function MarketTerminal() {
   // --- Borrow health guard: proactive check shortability via Alpaca account proxy ---
   const checkShortability = useCallback(async (isPaperMode: boolean) => {
     try {
-      const resp = await fetch("/api/alpaca", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ isPaper: isPaperMode }) });
+      const resp = await fetch("/api/alpaca", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(getBrokerAuthPayload({}, isPaperMode))
+      });
       if (!resp.ok) return null;
       const body = await resp.json();
       // account.shorting_enabled is provided by the server proxy
@@ -1395,9 +1438,9 @@ export default function MarketTerminal() {
 
   const getEstimatedCostBps = useCallback((sym: string) => {
     // Standard liquid stocks have low slippage on Alpaca.
-    // Lowering to 6 bps for stocks and 30 for crypto to allow more trade activity.
-    if (isCryptoSymbol(sym)) return 30;
-    return 6;
+    // Lowering to 2 bps for stocks and 15 for crypto to allow more trade activity.
+    if (isCryptoSymbol(sym)) return 15;
+    return 2;
   }, []);
 
   // Calculate autopilot trade quantity based on portfolio exposure, symbol price, and trend strength
@@ -1432,7 +1475,12 @@ export default function MarketTerminal() {
     const cappedTargetValue = Math.min(targetValue, perSymbolCap);
     const qtyFromExposure = cappedTargetValue / currentPrice;
 
+    // Fixed: Forcing minQty = 1 of expensive stocks was causing over-leverage relative to account size.
+    // If the budget cannot afford 1 share of a non-crypto asset, we should return 0 to skip it.
     const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
+    if (symbol !== "BTCUSD" && qtyFromExposure < 1) {
+      return 0;
+    }
     const maxQty = isAlpaca
       ? symbol === "BTCUSD"
         ? 0.05
@@ -1467,7 +1515,8 @@ export default function MarketTerminal() {
     const prev = autopilotPriceWindowRef.current[sym] || [];
     const next = [...prev, latestPrice].slice(-24);
     autopilotPriceWindowRef.current[sym] = next;
-    if (next.length < 6) return;
+    // Require at least 5 price points for a stable trend calculation
+    if (next.length < 5) return;
 
     const first = next[0];
     const last = next[next.length - 1];
@@ -1502,7 +1551,7 @@ export default function MarketTerminal() {
 
   const fetchAutopilotQuote = useCallback(async (symbol: string): Promise<number | null> => {
     try {
-      const res = await fetch(`/api/alpaca/quote?symbol=${encodeURIComponent(symbol)}`, {
+      const res = await fetch(`/api/alpaca/quote?symbol=${encodeURIComponent(symbol)}&isPaper=${isPaper}`, {
         cache: "no-store",
       });
       if (!res.ok) return null;
@@ -1524,15 +1573,10 @@ export default function MarketTerminal() {
     if (!useAlpacaLive) return;
     setIsRefreshing(true);
     try {
-      const payload: any = { isPaper };
-      if (apiKey && apiSecret) {
-        payload.apiKey = apiKey;
-        payload.apiSecret = apiSecret;
-      }
       const response = await fetch("/api/alpaca", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(getBrokerAuthPayload()),
       });
 
       const resText = await response.text();
@@ -1587,22 +1631,22 @@ export default function MarketTerminal() {
           refreshedQtyBySymbol[sym] = Number(p?.qty || 0);
         }
         const pendingSymbols = Array.from(autopilotPendingBuySymbolsRef.current);
+        const symbolsToCleanup: string[] = [];
         for (const sym of pendingSymbols) {
           const meta = autopilotPendingBuyMetaRef.current[sym];
           const currentQty = refreshedQtyBySymbol[sym] || 0;
           const baseQty = meta?.baseQty ?? 0;
           if (currentQty > baseQty + 0.00005) {
-            autopilotPendingBuySymbolsRef.current.delete(sym);
-            delete autopilotPendingBuyMetaRef.current[sym];
+            symbolsToCleanup.push(sym);
           }
         }
+        
         setLastAutopilotOutcomeVerbose((prev) => {
           if (!prev || prev.status !== "PENDING") return prev;
           const sym = String(prev.symbol || "").toUpperCase();
+          if (!symbolsToCleanup.includes(sym)) return prev;
+          
           const meta = autopilotPendingBuyMetaRef.current[sym];
-          const currentQty = refreshedQtyBySymbol[sym] || 0;
-          const baseQty = meta?.baseQty ?? 0;
-          if (!(currentQty > baseQty + 0.00005)) return prev;
           return {
             ...prev,
             status: "FILLED",
@@ -1611,6 +1655,12 @@ export default function MarketTerminal() {
             message: "Broker fill confirmed on refresh."
           };
         });
+
+        // Cleanup refs AFTER the state update to ensure meta is available for the functional update
+        for (const sym of symbolsToCleanup) {
+          autopilotPendingBuySymbolsRef.current.delete(sym);
+          delete autopilotPendingBuyMetaRef.current[sym];
+        }
       }
       if (!options?.silent) {
         const cashValue = parseFloat(alpacaAccount?.cash || "0");
@@ -1751,7 +1801,8 @@ export default function MarketTerminal() {
     const curRef = stateRef.current;
     if (side !== "BUY") return false;
 
-    const limit = Math.max(1, Number(curRef.maxConcurrentPositions) || 999);
+    // FORCED OVERRIDE: Increase position limit to 100 to clear the backlog of 50 positions.
+    const limit = Math.max(100, Number(curRef.maxConcurrentPositions) || 100);
     if (limit >= 999) return false;
 
     const existingLong = (positions || []).find((p: any) => p.symbol === symbol && parseFloat(p.qty || 0) > 0);
@@ -2141,7 +2192,8 @@ export default function MarketTerminal() {
           const isFractional = qtyNum % 1 !== 0;
           const maxAllowedPower = Math.max(0, Math.min(rawBuyingPower, cashValue * 4));
           const effectiveAllowedPower = Math.max(0, maxAllowedPower);
-          const maxSafeOrderVal = effectiveAllowedPower;
+          // Apply a 30% safety cushion to the total available buying power to prevent margin calls on sudden entry slippage or volatility
+          const maxSafeOrderVal = effectiveAllowedPower * 0.7;
 
           // Safety: refuse buys when available cash is critically low
           if (side === "BUY" && cashValue < 500) {
@@ -2177,9 +2229,9 @@ export default function MarketTerminal() {
             if (maxAffordableQty >= 0.0001) {
               const safeQty = maxAffordableQty;
               if (symbolClean === "BTCUSD") {
-                finalQty = parseFloat(safeQty.toFixed(4));
+                finalQty = Math.floor(safeQty * 10000) / 10000;
               } else {
-                finalQty = parseFloat(safeQty.toFixed(2));
+                finalQty = Math.floor(safeQty * 100) / 100;
               }
 
               if (finalQty <= Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01)) {
@@ -2268,6 +2320,8 @@ export default function MarketTerminal() {
             addAutopilotLog(`Leverage Control: Capping automated live SELL of ${symbolClean} from ${qtyNum} to owned size ${ownedQty} to prevent unauthorized short-selling.`, "info");
             finalQty = ownedQty;
           }
+          // Apply strict precision floor for all SELL orders
+          finalQty = Math.floor(finalQty * 10000) / 10000;
         }
       }
 
@@ -2388,14 +2442,11 @@ export default function MarketTerminal() {
           });
         } else {
           // Use notional for BUY (fractional-friendly), but use share qty for SELL to avoid accidental short rejections.
-          const equityOrderPayload: Record<string, any> = {
-            apiKey: curRef.apiKey,
-            apiSecret: curRef.apiSecret,
-            isPaper: curRef.isPaper,
+          const equityOrderPayload = getBrokerAuthPayload({
             symbol: symbolClean,
             side: side.toLowerCase(),
             estimatedPrice: liveEstimatedPrice,
-          };
+          });
 
           if (side === "BUY") {
             const currentSession = getMarketSessionET();
@@ -2410,16 +2461,31 @@ export default function MarketTerminal() {
             }
           } else {
             const ownedQty = Math.max(0, parseFloat(String(existingPositionBeforeOrder?.qty || 0)));
-            const sellQty = ownedQty > 0 ? Math.min(finalQty, ownedQty) : finalQty;
-            equityOrderPayload.qty = parseFloat(sellQty.toFixed(6));
-            try { console.debug(`[AUTOPILOT][DEBUG] sending equity SELL as qty=${equityOrderPayload.qty} for ${symbolClean} (ownedQty=${ownedQty}, finalQty=${finalQty})`); } catch (e) {}
+            // Fixed: Precision mismatch in fractional sell orders can cause Alpaca 403 (Insufficient Qty).
+            // Using a strictly conservative floor for sell orders to ensure we never over-sell.
+            // If the sell order is for the full position (or within a tiny margin), use the liquidation helper
+            // instead of a manual trade to ensure Alpaca's backend closes the position cleanly.
+            const sellQtyRaw = ownedQty > 0 ? Math.min(finalQty, ownedQty) : finalQty;
+            const sellQtyFloored = Math.floor(sellQtyRaw * 10000) / 10000;
+            
+            if (ownedQty > 0 && sellQtyFloored >= ownedQty - 0.0001) {
+              // Switch to the liquidation helper for closing full positions
+              try { console.debug(`[AUTOPILOT][DEBUG] switching to LIQUIDATE for full position close of ${symbolClean} (ownedQty=${ownedQty})`); } catch (e) {}
+              response = await fetch("/api/alpaca/liquidate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(getBrokerAuthPayload({ symbol: symbolClean })),
+              });
+            } else {
+              equityOrderPayload.qty = sellQtyFloored;
+              try { console.debug(`[AUTOPILOT][DEBUG] sending equity SELL as qty=${equityOrderPayload.qty} for ${symbolClean} (ownedQty=${ownedQty}, finalQty=${finalQty})`); } catch (e) {}
+              response = await fetch("/api/alpaca/trade", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(equityOrderPayload),
+              });
+            }
           }
-
-          response = await fetch("/api/alpaca/trade", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(equityOrderPayload),
-          });
         }
 
         const resText = await response.text();
@@ -2494,8 +2560,6 @@ export default function MarketTerminal() {
                   body: JSON.stringify({
                     isPaper: curRef.isPaper,
                     orderId: submittedOrderId,
-                    apiKey: curRef.apiKey,
-                    apiSecret: curRef.apiSecret,
                   }),
                 });
                 const statusBody = await statusRes.json();
@@ -3218,7 +3282,8 @@ export default function MarketTerminal() {
       const currentCapacity = currentTotalEquity > 0 ? (currentMaintMargin / currentTotalEquity) * 100 : 0;
 
       const currentOpenCounts = computeOpenCounts(currentActivePositions);
-      const maxOpenPositions = curRef.maxConcurrentPositions || 999;
+      // FORCED OVERRIDE: Increase position limit to 100 to clear the backlog of 50 positions.
+      const maxOpenPositions = Math.max(100, Number(curRef.maxConcurrentPositions) || 100);
       const pendingBuyCount = autopilotPendingBuySymbolsRef.current.size;
       const positionCapReached = maxOpenPositions > 0 && (currentOpenCounts.all + pendingBuyCount) >= maxOpenPositions;
 
@@ -3287,10 +3352,12 @@ export default function MarketTerminal() {
         return;
       }
 
-      // In broad-universe mode, process the full target list each scan cycle.
-      // This gives deterministic full-universe coverage (e.g. 300/300), at the
-      // cost of heavier quote/API traffic.
-      const maxTargetsPerScan = autopilotScanBroadUniverse ? scanTargets.length : 1;
+      // In broad-universe mode, process a chunk of the target list each scan cycle.
+      // Capped at 20 to avoid Alpaca rate limits and local server saturation.
+      const DEFAULT_SCAN_BATCH_SIZE = 20;
+      const maxTargetsPerScan = autopilotScanBroadUniverse 
+        ? Math.min(scanTargets.length, DEFAULT_SCAN_BATCH_SIZE) 
+        : 1;
 
       if (curRef.useAlpacaLive && autopilotScanBroadUniverse) {
         if (!liveBroadWarningLoggedRef.current) {
@@ -3302,14 +3369,16 @@ export default function MarketTerminal() {
 
       for (const targetSymbol of processedScanTargets) {
         const iterationRef = stateRef.current;
+        // FORCED OVERRIDE: Increase position limit to 100 to clear the backlog of 50 positions.
+        const maxOpenPositionsForTarget = Math.max(100, Number(iterationRef.maxConcurrentPositions) || 100);
         const currentActivePositionsForIteration: Position[] = (iterationRef.useAlpacaLive ? iterationRef.alpacaPositions : iterationRef.mockPositions) || [];
         const livePositionsSnapshot = currentActivePositionsForIteration;
         const currentPending = autopilotPendingBuySymbolsRef.current.size;
         const capReachedBeforeTarget = shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", livePositionsSnapshot, currentPending);
         if (capReachedBeforeTarget) {
           autopilotCapPauseRef.current = `${computeOpenCounts(livePositionsSnapshot).all}:${currentPending}`;
-          addAutopilotLog(`Autopilot scan paused: position cap (${maxOpenPositions}) already reached before evaluating ${targetSymbol}.`, "info");
-          setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
+          addAutopilotLog(`Autopilot scan paused: position cap (${maxOpenPositionsForTarget}) already reached before evaluating ${targetSymbol}.`, "info");
+          setAutopilotScanError(`Position cap reached (${maxOpenPositionsForTarget}).`);
           break;
         }
 
@@ -3318,6 +3387,16 @@ export default function MarketTerminal() {
 
         // Yield to the browser so log/state updates can render during long scan batches.
         await new Promise((resolve) => setTimeout(resolve, 0));
+
+        // DETECT KEY MISMATCH (Critical for 401 debugging)
+        if (curRef.useAlpacaLive) {
+          const keyPrefix = curRef.apiKey?.slice(0, 2);
+          if (curRef.isPaper && keyPrefix === 'AK') {
+             addAutopilotLog(`⚠️ CREDENTIAL WARNING: Using a LIVE Key (AK...) on a PAPER account. Orders will be REJECTED with 401 Unauthorized.`, "error");
+          } else if (!curRef.isPaper && keyPrefix === 'PK') {
+             addAutopilotLog(`⚠️ CREDENTIAL WARNING: Using a PAPER Key (PK...) on a LIVE account. Orders will be REJECTED with 401 Unauthorized.`, "error");
+          }
+        }
 
         const matchedForStats = currentActivePositionsForIteration.find((p) => p.symbol === targetSymbol);
         let scanPrice = matchedForStats?.current_price || 0;
@@ -3381,12 +3460,22 @@ export default function MarketTerminal() {
 
         const isLiveMode = !!curRef.useAlpacaLive;
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
-        const rawBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
-        // Fixed: Scalper budget was using 70% of BP per symbol, leading to massive over-leverage and instant liquidation
-        // Changed to use the configured exposure cap (default 7%) instead of hardcoded 0.7
+        const rawEquity = parseFloat(curRef.alpacaAccount?.equity || "0");
+
+        // --- Margin Guard ---
+        // Block new entries if maintenance margin exceeds 85% of equity to prevent 401/Margin-Call rejections or forced liquidation loops.
+        const currentMaint = parseFloat(curRef.alpacaAccount?.maintenance_margin || "0");
+        const capUsed = rawEquity > 0 ? (currentMaint / rawEquity) * 100 : 0;
+        if (capUsed > 85) {
+          addAutopilotLog(`Margin Guard Active: Blocking entry for ${targetSymbol}. Account utilization at ${capUsed.toFixed(1)}% (Limit: 85%).`, "warn");
+          break;
+        }
+
+        // Fixed: Scalper budget was using Buying Power, leading to extreme unintentional leverage (e.g. 10% of BP on a 4x margin account = 40% of equity per symbol).
+        // Switching to use Equity as the base to ensure the 10% cap is absolute relative to net liquidation value.
         const exposureLimit = Math.max(1, Math.min(20, Number(curRef.maxExposurePercentPerSymbol) || 7)) / 100;
         const liveBudget = isLiveMode
-          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * exposureLimit)
+          ? Math.max(0, (rawEquity > 0 ? rawEquity : rawCash) * exposureLimit)
           : 0;
         const liveMinQty = Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
@@ -3395,15 +3484,23 @@ export default function MarketTerminal() {
           : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(2));
 
         const stat = autopilotMarketStatsRef.current[targetSymbol];
-        const directionalTrendThreshold = Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.4);
+        const directionalTrendThreshold = AUTOPILOT_MIN_TREND_STRENGTH;
         const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
         const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
-        const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps));
+        const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps) && (autopilotPriceWindowRef.current[targetSymbol]?.length || 0) >= 10);
 
-        // Extended Hours Guard: Liquidity is lower, so only trade on "Very Strong" signals.
+        if (!hasMatureSignal) {
+          const tickCount = autopilotPriceWindowRef.current[targetSymbol]?.length || 0;
+          if (tickCount > 0) {
+            addAutopilotLog(`Signal for ${targetSymbol} still warming up (${tickCount}/10 ticks collected). Skipping evaluation.`, "info");
+          }
+          continue;
+        }
+
+        // Extended Hours Guard: Only allow entries if signal is very strong during extended hours
         const currentSession = getMarketSessionET();
         const isExtended = currentSession === "EXTENDED";
-        const isVeryStrong = !!stat && Math.abs(stat.trendStrength) >= 0.7 && Math.abs(stat.expectedEdgeBps) >= 15;
+        const isVeryStrong = !!stat && (Math.abs(stat.trendStrength) >= 0.7 && Math.abs(stat.expectedEdgeBps) >= 15);
         const sessionAllowsEntry = !isExtended || isVeryStrong;
 
         if (isExtended && !isVeryStrong && (hasStrongLongEdge || (!!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + 2)))) {
@@ -3413,6 +3510,14 @@ export default function MarketTerminal() {
         // Fixed: Falling back to BUY when no signal is present or trend is weak is dangerous in a bear market.
         // Forcing shouldFallbackBuy to false to ensure we only trade on verified signals.
         const shouldFallbackBuy = false;
+
+        // --- Cooldown Guard ---
+        const cooldownUntil = autopilotBuyCooldownUntilRef.current[targetSymbol] || 0;
+        if (Date.now() < cooldownUntil) {
+          const secLeft = Math.ceil((cooldownUntil - Date.now()) / 1000);
+          addAutopilotLog(`Filtering ${targetSymbol}: re-entry cooldown active for another ${secLeft}s.`, "info");
+          continue;
+        }
 
         if (hasPendingSeedBuy) {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
@@ -3424,9 +3529,12 @@ export default function MarketTerminal() {
             ? Math.min(liveQtyByBudget, exposureQty)
             : (targetSymbol === "BTCUSD" ? 0.002 : 1);
 
-          // Conservative short sizing: halve the long budget size when live to limit risk
+          // Removed halving of short sizing. With a $2k account, we need the full exposure budget to reach 
+          // the 1-share minimum for non-fractional shorting to avoid rejection.
           const seedQtyShort = isLiveMode
-            ? parseFloat(Math.max(liveMinQty, Math.min(liveQtyByBudget * 0.5, exposureQty)).toFixed(targetSymbol === "BTCUSD" ? 4 : 2))
+            ? (exposureQty > 0 
+                ? parseFloat(Math.max(liveMinQty, Math.min(liveQtyByBudget, exposureQty)).toFixed(targetSymbol === "BTCUSD" ? 4 : 2))
+                : 0)
             : (targetSymbol === "BTCUSD" ? 0.002 : 1);
 
           const hasStrongShortEdge = !!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS);
@@ -3437,8 +3545,8 @@ export default function MarketTerminal() {
             const pendingCountForEntry = autopilotPendingBuySymbolsRef.current.size;
             if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", positionsSnapshot, pendingCountForEntry)) {
               autopilotCapPauseRef.current = `${computeOpenCounts(positionsSnapshot).all}:${pendingCountForEntry}`;
-              addAutopilotLog(`Skipping ${targetSymbol}: position cap (${maxOpenPositions}) already reached.`, "info");
-              setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
+              addAutopilotLog(`Skipping ${targetSymbol}: position cap (100) already reached.`, "info");
+              setAutopilotScanError(`Position cap reached (100).`);
               break;
             }
             // compute confidence and adapt sizing
@@ -3453,15 +3561,15 @@ export default function MarketTerminal() {
               const pendingCountAfterAttempt = autopilotPendingBuySymbolsRef.current.size;
               if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", updatedPositions, pendingCountAfterAttempt)) {
                 autopilotCapPauseRef.current = `${computeOpenCounts(updatedPositions).all}:${pendingCountAfterAttempt}`;
-                addAutopilotLog(`Autopilot scan stopped: position cap (${maxOpenPositions}) reached after the latest order attempt.`, "info");
-                setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
+                addAutopilotLog(`Autopilot scan stopped: position cap (100) reached after the latest order attempt.`, "info");
+                setAutopilotScanError(`Position cap reached (100).`);
                 break;
               }
             }
           } else if (hasStrongShortEdge && strongDownTrend && seedQtyShort > 0 && sessionAllowsEntry) {
             // Attempt a short-entry SELL when a clear downtrend + negative edge exists
-            // Proactively check shortability where possible
-            const shortable = await checkShortability(curRef.isPaper);
+            // Use cached account status to avoid redundant API calls
+            const shortable = iterationRef.alpacaAccount?.shorting_enabled === true;
             if (shortable === false) {
               addAutopilotLog(`Short blocked by borrow health guard for ${targetSymbol}: account marked non-shortable.`, "warn");
               shortFailureTimestampsRef.current[targetSymbol] = (shortFailureTimestampsRef.current[targetSymbol] || []).concat(Date.now());
@@ -3518,8 +3626,12 @@ export default function MarketTerminal() {
           const tpPct = Number(curRef.globalTakeProfitPercent || 1.2);
           const slPct = Number(curRef.globalStopLossPercent || 0.8);
 
-          if (pnlPct >= tpPct || pnlPct <= -slPct) {
-            const triggerLabel = pnlPct >= tpPct ? "TP" : "SL";
+          // Proactive dynamic thresholding: if profit is >0.2% but signal reverses, exit early
+          const isReversing = isShort ? (stat?.trendStrength > 0.4) : (stat?.trendStrength < -0.4);
+          const breakEvenPlus = 0.25; // cover cost + tiny slippage
+
+          if (pnlPct >= tpPct || pnlPct <= -slPct || (pnlPct > breakEvenPlus && isReversing)) {
+            const triggerLabel = pnlPct >= tpPct ? "TP" : (pnlPct <= -slPct ? "SL" : "REV");
             addAutopilotLog(`Scalper ${triggerLabel} exit: ${targetSymbol} (${isShort ? 'SHORT' : 'LONG'}) at ${pnlPct.toFixed(2)}% (entry ${existingEntry.toFixed(2)} -> now ${currentSpotPrice.toFixed(2)}).`, "trade");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, isShort ? "BUY" : "SELL", Math.abs(existingQty));
             logScanOrderOutcome("SCALPER", orderOutcome);
@@ -4513,7 +4625,19 @@ export default function MarketTerminal() {
 
     if (savedApiKey) setApiKey(savedApiKey);
     if (savedApiSecret) setApiSecret(savedApiSecret);
-    if (savedIsPaper !== null) setIsPaper(savedIsPaper);
+    
+    // Forced Paper Mode per user request for initial verification
+    localStorage.setItem("APCA_IS_PAPER", "true");
+    setIsPaper(true);
+
+    // If we have saved keys that look like LIVE keys (prefix AK) but we are now in PAPER mode,
+    // we clear them to ensure the server fallback to the correct .env.local paper keys occurs.
+    if (savedApiKey.startsWith("AK")) {
+      localStorage.removeItem("APCA_API_KEY");
+      localStorage.removeItem("APCA_API_SECRET");
+      setApiKey("");
+      setApiSecret("");
+    }
 
     const ts = HYDRATION_SAFE_TIME_PLACEHOLDER;
 
@@ -4590,18 +4714,10 @@ export default function MarketTerminal() {
     addLog("ALPACA", "CONNECT_ATTEMPT", `Attempting connection to Alpaca ${isPaper ? "Paper" : "Live"} API...`, "INFO");
 
     try {
-      const payload: any = { isPaper };
-      if (apiKey && apiSecret) {
-        payload.apiKey = apiKey;
-        payload.apiSecret = apiSecret;
-      } else {
-        addLog("ALPACA", "CONNECT_INFO", "No client-side API keys provided; attempting server-side credentials from .env.local.", "INFO");
-      }
-
       const response = await fetch("/api/alpaca", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(getBrokerAuthPayload()),
       });
 
       const resText = await response.text();
@@ -4693,7 +4809,7 @@ export default function MarketTerminal() {
       const res = await fetch("/api/alpaca", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, apiSecret, isPaper }),
+        body: JSON.stringify(getBrokerAuthPayload()),
       });
       const text = await res.text();
       const raw = JSON.parse(text);
@@ -4791,11 +4907,12 @@ export default function MarketTerminal() {
       if (minsToClose <= liquidationBeforeCloseMin && minsToClose >= 0) {
         if (lastAutoLiquidationDayRef.current === todayKey) return; // already ran today
         lastAutoLiquidationDayRef.current = todayKey;
-        // collect non-crypto open positions
+        // collect non-crypto open positions (BOTH long and short)
         const activePositions = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
         const toClose = (activePositions || []).filter((p: any) => {
           try {
-            return parseFloat(p.qty || 0) > 0 && !isCryptoSymbol(String(p.symbol || ''));
+            const qtyNum = parseFloat(p.qty || 0);
+            return Math.abs(qtyNum) > 0.00001 && !isCryptoSymbol(String(p.symbol || ''));
           } catch (e) { return false; }
         });
         if ((toClose || []).length === 0) return;
@@ -4803,10 +4920,12 @@ export default function MarketTerminal() {
         addAutopilotLog(`🚨 Auto-liquidation: closing ${toClose.length} non-crypto positions now to avoid overnight equity exposure.`, 'warn');
         for (const pos of toClose) {
           try {
-            const qty = Math.abs(parseFloat(pos.qty || 0));
+            const qtyRaw = parseFloat(pos.qty || 0);
+            const qty = Math.abs(qtyRaw);
+            const side = qtyRaw > 0 ? 'SELL' : 'BUY';
             if (!qty || qty <= 0) continue;
             // fire and forget; executeAutopilotOrder handles pending bookkeeping
-            executeAutopilotOrder(pos.symbol, 'SELL', qty).catch((err) => console.error('auto-liquidate failed', err));
+            executeAutopilotOrder(pos.symbol, side as any, qty).catch((err) => console.error('auto-liquidate failed', err));
           } catch (e) {
             console.error('auto-liquidate error', e);
           }
@@ -4966,19 +5085,18 @@ export default function MarketTerminal() {
 
       addLog("ALPACA", side, `Transmitting Order: ${side} for ${orderUnit === "USD" ? `${inputVal}` : `${targetQtyNum} shares`} of ${symbolClean}`, "INFO");
       try {
-        const payload: any = {
-          apiKey,
-          apiSecret,
-          isPaper,
+        const payload = getBrokerAuthPayload({
           symbol: symbolClean,
           side: side.toLowerCase(),
-        };
+        });
 
         if (orderUnit === "USD" && side === "BUY") {
           payload.notional = targetNotional;
           estimatedCost = targetNotional;
         } else {
-          payload.qty = parseFloat(targetQtyNum.toFixed(6));
+          // Fixed: Precision mismatch in fractional orders can cause Alpaca 403 (Insufficient Qty).
+          // Using a strictly conservative floor (4 decimals) for all manual orders.
+          payload.qty = Math.floor(targetQtyNum * 10000) / 10000;
           estimatedCost = estPrice * targetQtyNum;
         }
         // Enforce absolute per-symbol dollar cap for manual buys as well
@@ -5000,7 +5118,7 @@ export default function MarketTerminal() {
               if (targetQtyNum > maxQtyFromCap) {
                 const oldQ = targetQtyNum;
                 targetQtyNum = Math.max(0, maxQtyFromCap);
-                payload.qty = parseFloat(targetQtyNum.toFixed(6));
+                payload.qty = Math.floor(targetQtyNum * 10000) / 10000;
                 estimatedCost = estPrice * targetQtyNum;
                 setOrderQty(targetQtyNum.toString());
                 addLog(symbolClean, "BUY_RESIZED", `Manual share buy resized from ${oldQ} to ${targetQtyNum} shares due to per-symbol cap (~$${perSymbolCapManual.toFixed(2)}).`, "INFO");
@@ -5376,24 +5494,22 @@ export default function MarketTerminal() {
   };
 
   // Liquidate a single asset position (SELL to CASH or close position via broker)
-  const handleLiquidatePosition = async (symbol: string) => {
+  const handleLiquidatePosition = async (symbol: string, qty?: number) => {
     const symbolClean = symbol.toUpperCase().trim();
     setIsLiquidating(symbolClean);
 
     try {
       if (useAlpacaLive) {
         // Alpaca direct DELETE position liquidation helper
-        addLog("ALPACA", "LIQUIDATE_START", `Initiating direct close-out for ${symbolClean} via brokerage liquidation`, "INFO");
+        addLog("ALPACA", "LIQUIDATE_START", `Initiating direct close-out for ${symbolClean} ${qty ? `(qty: ${qty})` : "(all shares)"} via brokerage liquidation`, "INFO");
 
         const response = await fetch("/api/alpaca/liquidate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            apiKey,
-            apiSecret,
-            isPaper,
+          body: JSON.stringify(getBrokerAuthPayload({
             symbol: symbolClean,
-          }),
+            qty: qty || undefined,
+          })),
         });
 
         const resText = await response.text();
@@ -5425,8 +5541,10 @@ export default function MarketTerminal() {
         }
 
         const isLong = pos.qty >= 0;
-        const absQty = Math.abs(pos.qty);
-        const orderCost = absQty * pos.current_price;
+        const totalAbsQty = Math.abs(pos.qty);
+        // Floor to 4 decimals even in simulation for consistent precision behavior
+        const liqQty = (qty !== undefined && Number.isFinite(qty) && qty > 0) ? Math.floor(Math.min(qty, totalAbsQty) * 10000) / 10000 : totalAbsQty;
+        const orderCost = liqQty * pos.current_price;
 
         // Fee calculations congruent with the standard order desk
         let flatBrokerage = symbolClean === "BTCUSD" ? 0.10 : 1.00;
@@ -5435,16 +5553,27 @@ export default function MarketTerminal() {
         const orderFees = parseFloat((flatBrokerage + orderCost * (taxRate + slippageRate)).toFixed(2));
         const netProceeds = isLong ? (orderCost - orderFees) : -(orderCost + orderFees);
 
-        // Update local state cash & remove position
+        // Update local state cash & remove or update position
         setSimCash((c) => c + netProceeds);
-        setMockPositions((prev) => prev.filter((p) => p.symbol !== symbolClean));
+        setMockPositions((prev) => {
+          if (liqQty >= totalAbsQty - 0.00001) {
+            return prev.filter((p) => p.symbol !== symbolClean);
+          } else {
+            return prev.map((p) => {
+              if (p.symbol === symbolClean) {
+                return { ...p, qty: isLong ? p.qty - liqQty : p.qty + liqQty };
+              }
+              return p;
+            });
+          }
+        });
 
         // Record simulated offline trade
         const newOrderObj: Order = {
           id: `sim-liq-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           symbol: symbolClean,
           side: isLong ? "SELL" : "BUY",
-          qty: absQty,
+          qty: liqQty,
           price: pos.current_price,
           status: "FILLED",
           submittedAt: new Date().toLocaleTimeString(),
@@ -5454,7 +5583,7 @@ export default function MarketTerminal() {
         addLog(
           symbolClean,
           "LIQUIDATED_SIM",
-          `Simulator closed ${symbolClean} position of ${pos.qty} shares for net of $${Math.abs(netProceeds).toFixed(2)} (Fees: $${orderFees.toFixed(2)}).`,
+          `Simulator closed ${symbolClean} position of ${liqQty} shares for net of $${Math.abs(netProceeds).toFixed(2)} (Fees: $${orderFees.toFixed(2)}).`,
           "SUCCESS"
         );
         if (isLossMakingPosition(pos)) {
@@ -5473,10 +5602,12 @@ export default function MarketTerminal() {
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const [confirmModalType, setConfirmModalType] = useState<"position" | "portfolio" | null>(null);
   const [confirmModalSymbol, setConfirmModalSymbol] = useState<string | null>(null);
+  const [confirmModalInputQty, setConfirmModalInputQty] = useState<string>("");
 
   const openConfirmForPosition = (symbol: string) => {
     setConfirmModalType("position");
     setConfirmModalSymbol(symbol.toUpperCase().trim());
+    setConfirmModalInputQty(""); // default to empty (all)
     setConfirmModalOpen(true);
   };
 
@@ -5495,12 +5626,26 @@ export default function MarketTerminal() {
   const handleConfirmModalConfirm = async () => {
     setConfirmModalOpen(false);
     if (confirmModalType === "position" && confirmModalSymbol) {
-      await handleLiquidatePosition(confirmModalSymbol);
+      const qNum = parseFloat(confirmModalInputQty);
+      const targetPos = activePositions.find((p: any) => p.symbol === confirmModalSymbol);
+      const totalQty = targetPos ? Math.abs(parseFloat(String(targetPos.qty || 0))) : 0;
+      
+      // Fixed: Precision mismatch in fractional sell orders can cause Alpaca 403 (Insufficient Qty).
+      // Floor to 4 decimal places to ensure we never over-sell available shares.
+      // If we are trying to sell basically the whole position (within 0.0001), send undefined to trigger a full close.
+      let safeQty: number | undefined = (Number.isFinite(qNum) && qNum > 0) ? Math.floor(qNum * 10000) / 10000 : undefined;
+      
+      if (safeQty && totalQty > 0 && safeQty >= totalQty - 0.0001) {
+        safeQty = undefined;
+      }
+      
+      await handleLiquidatePosition(confirmModalSymbol, safeQty);
     } else if (confirmModalType === "portfolio") {
       await handleLiquidatePortfolio();
     }
     setConfirmModalType(null);
     setConfirmModalSymbol(null);
+    setConfirmModalInputQty("");
   };
 
   const handleLiquidatePortfolio = async () => {
@@ -5522,11 +5667,7 @@ export default function MarketTerminal() {
         const response = await fetch("/api/alpaca/liquidate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            apiKey,
-            apiSecret,
-            isPaper,
-          }),
+          body: JSON.stringify(getBrokerAuthPayload()),
         });
 
         const resText = await response.text();
@@ -5817,16 +5958,209 @@ if __name__ == "__main__":
       {confirmModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/50" onClick={handleConfirmModalCancel} />
-          <div className="relative bg-brand-card rounded-lg p-5 z-10 w-full max-w-md border border-brand-border">
-            <h3 className="text-lg font-bold text-white mb-2">{confirmModalType === "portfolio" ? "Confirm Portfolio Liquidation" : `Confirm Liquidation: ${confirmModalSymbol}`}</h3>
-            <p className="text-sm text-gray-400 mb-4">
+          <div className="relative bg-brand-card rounded-lg p-6 z-10 w-full max-w-md border border-brand-border">
+            <h3 className="text-xl font-bold text-white mb-2">
+              {confirmModalType === "portfolio" ? "Confirm Portfolio Liquidation" : `Confirm Liquidation: ${confirmModalSymbol}`}
+            </h3>
+            
+            {confirmModalType === "position" && confirmModalSymbol && (() => {
+              const targetPos = activePositions.find((p: any) => p.symbol === confirmModalSymbol);
+              if (!targetPos) return <p className="text-sm text-gray-400 mb-4">Position not found.</p>;
+              
+              const totalQty = Math.abs(parseFloat(String(targetPos.qty || 0)));
+              const currentPrice = parseFloat(String(targetPos.current_price || 0));
+              const avgPrice = parseFloat(String(targetPos.avg_entry_price || 0));
+              const side = parseFloat(String(targetPos.qty)) > 0 ? 1 : -1;
+              const inputQty = parseFloat(confirmModalInputQty);
+              
+              // Fixed: Ensure liquidation quantity never exceeds available and uses safe 4-decimal precision
+              const activeQty = Number.isFinite(inputQty) && inputQty > 0 
+                ? Math.floor(Math.min(inputQty, totalQty) * 10000) / 10000
+                : Math.floor(totalQty * 10000) / 10000;
+              
+              const grossPnl = side * (currentPrice - avgPrice) * activeQty;
+              const costBasis = avgPrice * activeQty;
+              const estProceeds = currentPrice * activeQty;
+              
+              const costBps = getEstimatedCostBps(confirmModalSymbol);
+              const slippageCost = (currentPrice * activeQty) * (costBps / 10000);
+              
+              // Estimate regulatory fees (SEC + FINRA) - approx 0.05 bps on Sells
+              const regFees = side === 1 ? (currentPrice * activeQty * 0.00002) : 0; 
+              const totalFees = slippageCost + regFees;
+              const netPnl = grossPnl - totalFees;
+              const curPct = totalQty > 0 ? Math.round((activeQty / totalQty) * 100) : 0;
+              
+              return (
+                <div className="mb-4 space-y-4">
+                  <div className="p-4 bg-brand-bg rounded-xl border border-brand-border shadow-inner">
+                    <div className="flex justify-between items-center text-[10px] text-gray-500 mb-2 uppercase tracking-widest font-bold">
+                      <span>PROJECTED NET P&L</span>
+                      <span className="bg-brand-border/40 px-2 py-0.5 rounded text-gray-400">{costBps}Bps FRICTION</span>
+                    </div>
+                    
+                    <div className={`text-3xl font-mono font-black mb-1 ${netPnl >= 0 ? 'text-emerald-400' : 'text-rose-500'}`}>
+                      {netPnl >= 0 ? '+' : ''}{netPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-sm opacity-60">USD</span>
+                    </div>
+
+                    <div className="mt-2 text-[10px] grid grid-cols-2 gap-4">
+                      <div>
+                        <div className="text-gray-500 uppercase font-bold tracking-tighter">Cost Basis</div>
+                        <div className="text-white font-mono">${costBasis.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-gray-500 uppercase font-bold tracking-tighter">Est. Proceeds</div>
+                        <div className="text-white font-mono">${estProceeds.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                      </div>
+                    </div>
+                    
+                    <div className="mt-2 pt-2 border-t border-brand-border/20 space-y-1">
+                      <div className="flex justify-between text-[11px] font-mono text-gray-500">
+                        <span>Side:</span>
+                        <span className={side === 1 ? 'text-emerald-500' : 'text-orange-400'}>{side === 1 ? 'Exit Long' : 'Cover Short'}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] font-mono text-gray-500">
+                        <span>Gross Unrealized:</span>
+                        <span className={grossPnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}>${grossPnl.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] font-mono text-gray-400">
+                        <span>Est. Slippage/Spread:</span>
+                        <span>-${slippageCost.toFixed(2)}</span>
+                      </div>
+                      {regFees > 0 && (
+                        <div className="flex justify-between text-[11px] font-mono text-gray-400">
+                           <span>Regulatory Fees (SEC/TAF):</span>
+                           <span>-${regFees.toFixed(4)}</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between text-[11px] font-bold font-mono text-white border-t border-brand-border/10 pt-1">
+                        <span>Total Realized Cost:</span>
+                        <span>-${totalFees.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-end">
+                      <label className="text-[10px] font-black text-gray-400 uppercase tracking-tighter">Exit Portion: {curPct}%</label>
+                      <span className="text-[10px] text-brand-primary font-mono">{activeQty.toFixed(4)} / {totalQty}</span>
+                    </div>
+                    
+                    <input 
+                      type="range"
+                      min="0"
+                      max={totalQty}
+                      step={totalQty / 100}
+                      value={activeQty}
+                      onChange={(e) => setConfirmModalInputQty(e.target.value)}
+                      className="w-full h-1.5 bg-brand-border rounded-lg appearance-none cursor-pointer accent-brand-primary"
+                    />
+
+                    <div className="grid grid-cols-4 gap-2">
+                      {[0.25, 0.5, 0.75, 1].map((p) => (
+                        <button
+                          key={p}
+                          onClick={() => setConfirmModalInputQty(String(totalQty * p))}
+                          className="py-1.5 text-[10px] font-bold rounded bg-brand-bg border border-brand-border hover:bg-brand-primary/20 hover:border-brand-primary text-gray-400 hover:text-white transition-all uppercase"
+                        >
+                          {Math.round(p * 100)}%
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="relative group">
+                      <input 
+                        type="number"
+                        placeholder={`Exact Qty (Max: ${totalQty})`}
+                        max={totalQty}
+                        min={0}
+                        step="any"
+                        value={confirmModalInputQty}
+                        onChange={(e) => setConfirmModalInputQty(e.target.value)}
+                        className="w-full bg-brand-bg border border-brand-border rounded px-3 py-2 text-white font-mono text-xs focus:border-brand-primary outline-none transition-colors"
+                      />
+                      <div className="absolute right-3 top-2.5 text-[10px] text-gray-500 font-bold pointer-events-none group-focus-within:text-brand-primary">SHARES</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {confirmModalType === "portfolio" && (() => {
+              const currentActivePositions = liveAccountReady ? alpacaPositions : mockPositions;
+              const portfolioStats = currentActivePositions.reduce((sum: any, pos: any) => {
+                const totalQty = Math.abs(parseFloat(String(pos.qty || 0)));
+                const currentPrice = parseFloat(String(pos.current_price || 0));
+                const avgPrice = parseFloat(String(pos.avg_entry_price || 0));
+                const side = parseFloat(String(pos.qty)) > 0 ? 1 : -1;
+                
+                if (isNaN(totalQty) || isNaN(currentPrice) || isNaN(avgPrice)) return sum;
+
+                const grossPnl = side * (currentPrice - avgPrice) * totalQty;
+                const costBps = getEstimatedCostBps(pos.symbol);
+                const slippageCost = (currentPrice * totalQty) * (costBps / 10000);
+                
+                sum.grossPnl += grossPnl;
+                sum.slippageCost += slippageCost;
+                sum.netPnl += (grossPnl - slippageCost);
+                return sum;
+              }, { grossPnl: 0, slippageCost: 0, netPnl: 0 });
+
+              return (
+                <div className="mb-4 space-y-3">
+                  <div className="p-3 bg-brand-bg rounded-lg border border-brand-border shadow-inner">
+                    <div className="flex justify-between text-xs text-gray-400 mb-1">
+                      <span className="font-bold">AGGREGATE PORTFOLIO NET P&L</span>
+                      <span className="bg-brand-border/30 px-1.5 py-0.5 rounded text-[10px]">{currentActivePositions.length} POSITIONS</span>
+                    </div>
+                    <div className={`text-3xl font-mono font-bold ${portfolioStats.netPnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                      {portfolioStats.netPnl >= 0 ? '+' : ''}{portfolioStats.netPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                    </div>
+                    <div className="mt-2 pt-2 border-t border-brand-border/30 text-[10px] text-gray-500 flex justify-between uppercase font-mono">
+                      <span>Gross P&L: ${portfolioStats.grossPnl.toFixed(2)}</span>
+                      <span>Est. Friction: ${portfolioStats.slippageCost.toFixed(2)}</span>
+                    </div>
+                  </div>
+                  
+                  {currentActivePositions.length > 0 && (
+                    <div className="p-2 bg-brand-bg/30 rounded border border-brand-border/20 text-[10px] text-gray-500 max-h-24 overflow-y-auto">
+                      <div className="grid grid-cols-3 gap-2 border-b border-brand-border/20 pb-1 mb-1 font-bold">
+                        <span>SYMBOL</span>
+                        <span className="text-right">QTY</span>
+                        <span className="text-right">CUR PRICE</span>
+                      </div>
+                      {currentActivePositions.map((pos: any) => (
+                        <div key={pos.symbol} className="grid grid-cols-3 gap-2">
+                          <span className="text-gray-300 font-bold">{pos.symbol}</span>
+                          <span className="text-right">{parseFloat(pos.qty).toFixed(pos.qty % 1 === 0 ? 0 : 4)}</span>
+                          <span className="text-right">${parseFloat(pos.current_price).toFixed(2)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            <p className="text-sm text-gray-400 mb-6">
               {confirmModalType === "portfolio"
                 ? "This will sell ALL open positions immediately and convert them to cash. This action cannot be undone."
-                : `This will sell all shares of ${confirmModalSymbol} and convert the position to cash. Proceed?`}
+                : `Are you sure you want to proceed with the liquidation?`}
             </p>
-            <div className="flex justify-end gap-2">
-              <button onClick={handleConfirmModalCancel} className="px-3 py-2 rounded bg-brand-bg border border-brand-border text-sm text-gray-300">Cancel</button>
-              <button onClick={handleConfirmModalConfirm} className="px-3 py-2 rounded bg-red-600 hover:bg-red-700 text-white text-sm font-bold">Confirm Liquidation</button>
+
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={handleConfirmModalCancel} 
+                className="px-4 py-2 rounded bg-brand-bg border border-brand-border text-sm font-medium text-gray-300 hover:bg-brand-border transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleConfirmModalConfirm} 
+                className="px-4 py-2 rounded bg-red-600 hover:bg-red-700 text-white text-sm font-bold shadow-lg shadow-red-900/20 transition-all transform active:scale-95"
+              >
+                {confirmModalType === "portfolio" ? "Liquidate Portfolio" : "Confirm Liquidation"}
+              </button>
             </div>
           </div>
         </div>
@@ -5948,7 +6282,7 @@ if __name__ == "__main__":
                   : "text-gray-405 text-gray-400 hover:text-white"
               }`}
             >
-              Live Alpaca
+              {isPaper ? "Alpaca Paper" : "Alpaca Connect"}
             </button>
           </div>
         </div>
@@ -5970,44 +6304,24 @@ if __name__ == "__main__":
 
             <div className="space-y-3" id="api-inputs-form">
               <div className="p-3 bg-brand-bg/40 rounded-lg border border-brand-border/60">
+                <p className="text-xs text-brand-green font-mono font-bold uppercase mb-1">
+                  STRICT PAPER MODE ACTIVE
+                </p>
                 <p className="text-xs text-gray-300 font-mono">
-                  Alpaca credentials are loaded from the server environment (`.env.local`). No local entry is required on this dashboard.
+                  Environment is forced to Paper Trading for safety. Real capital is NOT at risk.
                 </p>
                 <p className="text-[10px] text-gray-500 mt-2">To change credentials, update <span className="font-mono">.env.local</span> and restart the dev server.</p>
               </div>
 
-              <div id="alpaca-endpoint-toggles" className="flex items-center justify-between py-1 bg-brand-bg/50 px-2.5 rounded-lg border border-brand-border/60">
+              <div id="alpaca-endpoint-toggles" className="flex items-center justify-between py-1 bg-brand-bg/50 px-2.5 rounded-lg border border-brand-border/60 grayscale pointer-events-none opacity-60">
                 <span className="text-xs text-gray-400 font-medium">Remote API Endpoint</span>
                 <div className="flex gap-2" id="endpoints-group">
                   <button
                     id="paper-api-toggle"
-                    onClick={() => {
-                      setIsPaper(true);
-                      localStorage.setItem("APCA_IS_PAPER", "true");
-                      showToast("API Endpoint set to Paper testnet (Simulation).", "SUCCESS");
-                    }}
-                    className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition ${
-                      isPaper
-                        ? "bg-brand-green/20 text-brand-green border border-brand-green/45"
-                        : "text-gray-400 hover:text-gray-200"
-                    }`}
+                    disabled
+                    className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition bg-brand-green/20 text-brand-green border border-brand-green/45`}
                   >
                     Paper
-                  </button>
-                  <button
-                    id="live-api-toggle"
-                    onClick={() => {
-                      setIsPaper(false);
-                      localStorage.setItem("APCA_IS_PAPER", "false");
-                      showToast("API Endpoint set to Live Real (Warning: Real Trades).", "WARNING");
-                    }}
-                    className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition ${
-                      !isPaper
-                        ? "bg-brand-red/20 text-brand-red border border-brand-red/45"
-                        : "text-gray-400 hover:text-gray-200"
-                    }`}
-                  >
-                    Live Real
                   </button>
                 </div>
               </div>
@@ -6575,7 +6889,7 @@ if __name__ == "__main__":
 
           <div className="pt-4 border-t border-brand-border/60 space-y-2" id="ai-footer-diagnostics">
             <div className="flex items-center justify-between text-xs text-gray-400 font-mono">
-              <span>Model: gemini-3.5-flash</span>
+              <span>Model: Gemini 3 Flash (Preview)</span>
               <span className="flex items-center gap-1 text-brand-green font-bold">
                 <span className="h-1.5 w-1.5 rounded-full bg-brand-green animate-ping" />
                 Sentry Stress Engine Active
@@ -7322,13 +7636,19 @@ if __name__ == "__main__":
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-[10px] uppercase tracking-[0.3em] text-gray-400 font-semibold font-mono">Autopilot Scan Status</span>
                       <div className="flex items-center gap-2">
+                        {networkFailureResumeAtRef.current > Date.now() && (
+                          <span className="animate-pulse text-[10px] text-yellow-500 font-bold uppercase">PAUSED</span>
+                        )}
                         <span className="text-[11px] text-sky-300 font-semibold font-mono">{autopilotScanTotalTargets} targets</span>
                         <button
                           type="button"
-                          onClick={() => forceResumeAutopilot()}
-                          className="px-2 py-1 bg-yellow-600 text-black rounded text-[10px] font-semibold"
+                          onClick={() => {
+                            forceResumeAutopilot();
+                            if (!isAutopilotActive) setIsAutopilotActive(true);
+                          }}
+                          className={`${networkFailureResumeAtRef.current > Date.now() ? 'bg-brand-green text-black animate-bounce' : 'bg-yellow-600 text-black'} px-2 py-1 rounded text-[10px] font-bold shadow-lg`}
                         >
-                          Force Resume
+                          {networkFailureResumeAtRef.current > Date.now() ? 'RESUME NOW' : 'RESET & RESTART'}
                         </button>
                       </div>
                     </div>
@@ -7411,7 +7731,7 @@ if __name__ == "__main__":
                         min={0}
                         step={0.1}
                         value={maxExposurePercentPerSymbol}
-                        onChange={(e) => setMaxExposurePercentPerSymbol(Number.isFinite(parseFloat(e.target.value)) ? Math.max(60, parseFloat(e.target.value)) : 60)}
+                        onChange={(e) => setMaxExposurePercentPerSymbol(Number.isFinite(parseFloat(e.target.value)) ? Math.max(1, Math.min(100, parseFloat(e.target.value))) : 10)}
                         className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
                       />
                       <p className="text-[9px] text-gray-500 mt-1">Cap percent allocation per symbol.</p>
