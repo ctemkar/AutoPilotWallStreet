@@ -749,7 +749,7 @@ export default function MarketTerminal() {
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(100000); // reduced volume filter for more targets
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(15); // increased per symbol
-  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(20000); // 🚀 ELITE
+  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(35000); // 🚀 ELITE
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(255); // 🚀 ELITE
   
   // 🚀 ELITE: Hard override to ensure 255 positions even if storage is hijacked
@@ -765,19 +765,19 @@ export default function MarketTerminal() {
   const AUTOPILOT_MAX_TRADES_PER_DAY = 1000; // 🚀 INCREASED FOR PROFIT
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 500; // 🚀 INCREASED FOR PROFIT
   const AUTOPILOT_DAILY_PROFIT_GOAL_USD = 5000; // 🚀 INCREASED FOR PROFIT
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.15; // ⚡️ ELITE SCALPER (Lowered for high velocity)
-  const AUTOPILOT_MIN_ATR_PCT = 0.005; // ⚡️ even more aggressive
-  const AUTOPILOT_MAX_CHOP_SCORE = 0.55; // Allow more volatile markets
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 2; // Tighten for higher capture
-  const AUTOPILOT_MIN_EDGE_BPS = 5; // Catch smaller moves
-  const AUTOPILOT_MIN_EDGE_BUFFER_SHORT_BPS = 10; // ⚡️ AGGRESSIVE
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.18; // 🛡️ RAISED FOR QUALITY (From 0.05)
+  const AUTOPILOT_MIN_ATR_PCT = 0.015; // 🛡️ REQUIRE REAL VOLATILITY (From 0.002)
+  const AUTOPILOT_MAX_CHOP_SCORE = 0.48; // 🛡️ LOWER IS BETTER (From 0.55)
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 6; // Tighten for higher capture
+  const AUTOPILOT_MIN_EDGE_BPS = 10; // Catch smaller moves
+  const AUTOPILOT_MIN_EDGE_BUFFER_SHORT_BPS = 15; // ⚡️ AGGRESSIVE
   const AUTOPILOT_MIN_EDGE_BUFFER_LONG_BPS = 5; // ⚡️ AGGRESSIVE
-  const AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS = 3; // 🚀 ULTRA FAST START (Lowered from 8)
-  const AUTOPILOT_MAX_DRAWDOWN_PCT_STOP = 0.65; // 🛡️ WIDER STOP FOR VOLATILITY
-  const AUTOPILOT_TAKE_PROFIT_PCT = 1.05; // 🎯 TARGET (Raised from 0.75)
-  const AUTOPILOT_REVERSAL_EXIT_THRESHOLD = 0.15; // 🛡️ SENSITIVE
-  const AUTOPILOT_REVERSAL_PROFIT_MIN = 0.05; // 🛡️ LOCK IN SMALL GAINS
-  const AUTOPILOT_MAX_OPEN_TRADES = 100; // 🚀 UNBLOCK FULL UNIVERSE
+  const AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS = 4; // 🛡️ REQUIRE DATA MATURITY (Raised from 1)
+  const AUTOPILOT_MAX_DRAWDOWN_PCT_STOP = 0.35; // 🛡️ CUT LOSSES FASTER (From 0.65)
+  const AUTOPILOT_TAKE_PROFIT_PCT = 0.45; // 🎯 TARGET SCALPING (Lowered from 1.05)
+  const AUTOPILOT_REVERSAL_EXIT_THRESHOLD = 0.12; // 🛡️ SENSITIVE
+  const AUTOPILOT_REVERSAL_PROFIT_MIN = 0.08; // 🛡️ LOCK IN SMALL GAINS
+  const AUTOPILOT_MAX_OPEN_TRADES = 255; // 🚀 UNBLOCK FULL UNIVERSE
   const AUTOPILOT_POST_LOSS_COOLDOWN_MS = 5 * 60 * 1000; // FASTER RECOVERY
   const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
@@ -941,7 +941,7 @@ export default function MarketTerminal() {
         setAutopilotInterval(parsed);
       } else {
         // No saved value: default to 15s
-        setAutopilotInterval(10);
+        setAutopilotInterval(8);
       }
       const savedPerSymbolCap = typeof window !== "undefined" && localStorage.getItem("sentry:perSymbolDollarCap");
       if (savedPerSymbolCap) {
@@ -1472,8 +1472,8 @@ export default function MarketTerminal() {
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
     // Safer defaults: limit per-symbol % exposure to a conservative range
-    const exposureCap = Math.max(1, Math.min(20, Number(curRef.maxExposurePercentPerSymbol) || 7));
-    const baseExposurePct = 7; // default target: 7% of portfolio per symbol (was 70% - too large)
+    const exposureCap = Math.max(1, Math.min(90, Number(curRef.maxExposurePercentPerSymbol) || 7));
+    const baseExposurePct = Number(curRef.maxExposurePercentPerSymbol) || 7; 
     let exposurePct = baseExposurePct;
 
     if (stats) {
@@ -1592,8 +1592,12 @@ export default function MarketTerminal() {
   // Helper for fresh position lookups during critical order flows
   const fetchPositions = async () => {
     const auth = getBrokerAuthPayload();
-    const endpoint = `/api/alpaca?action=positions&apiKey=${auth.key}&apiSecret=${auth.secret}&isPaper=${auth.isPaper}`;
-    const res = await fetch(endpoint);
+    const endpoint = `/api/alpaca`;
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...auth, action: "positions" }),
+    });
     if (!res.ok) throw new Error("Failed to fetch fresh positions from API");
     const data = await res.json();
     return data.positions || [];
@@ -3577,7 +3581,7 @@ export default function MarketTerminal() {
         const existingScalperPos = currentActivePositions.find((p) => p.symbol === targetSymbol);
         const hasPendingSeedBuy = autopilotPendingBuySymbolsRef.current.has(targetSymbol);
 
-        const isLiveMode = !!curRef.useAlpacaLive;
+        const isLiveMode = !!curRef.useAlpacaLive || !!curRef.isPaper;
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
         const rawEquity = parseFloat(curRef.alpacaAccount?.equity || "0");
 
@@ -3593,11 +3597,11 @@ export default function MarketTerminal() {
 
         // Fixed: Scalper budget was using Buying Power, leading to extreme unintentional leverage (e.g. 10% of BP on a 4x margin account = 40% of equity per symbol).
         // Switching to use Equity as the base to ensure the 10% cap is absolute relative to net liquidation value.
-        const exposureLimit = Math.max(1, Math.min(20, Number(curRef.maxExposurePercentPerSymbol) || 7)) / 100;
+        const exposureLimit = Math.max(1, Math.min(95, Number(curRef.maxExposurePercentPerSymbol) || 15)) / 100;
         const liveBudget = isLiveMode
           ? Math.max(0, (rawEquity > 0 ? rawEquity : rawCash) * exposureLimit)
           : 0;
-        const liveMinQty = Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
+        const liveMinQty = Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.0001);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
         const liveQtyByBudget = targetSymbol === "BTCUSD" || targetSymbol === "ETHUSD"
           ? parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(5))
