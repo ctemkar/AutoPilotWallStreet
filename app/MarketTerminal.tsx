@@ -2320,8 +2320,7 @@ export default function MarketTerminal() {
             addAutopilotLog(`Leverage Control: Capping automated live SELL of ${symbolClean} from ${qtyNum} to owned size ${ownedQty} to prevent unauthorized short-selling.`, "info");
             finalQty = ownedQty;
           }
-          // Apply strict precision floor for all SELL orders
-          finalQty = Math.floor(finalQty * 10000) / 10000;
+          // Precision floor is now handled below to allow full-close detection for tiny positions.
         }
       }
 
@@ -2465,18 +2464,33 @@ export default function MarketTerminal() {
             // Using a strictly conservative floor for sell orders to ensure we never over-sell.
             // If the sell order is for the full position (or within a tiny margin), use the liquidation helper
             // instead of a manual trade to ensure Alpaca's backend closes the position cleanly.
-            const sellQtyRaw = ownedQty > 0 ? Math.min(finalQty, ownedQty) : finalQty;
-            const sellQtyFloored = Math.floor(sellQtyRaw * 10000) / 10000;
+            const sellQtyRaw = (ownedQty > 0 && side === "SELL") ? Math.min(finalQty, ownedQty) : finalQty;
             
-            if (ownedQty > 0 && sellQtyFloored >= ownedQty - 0.0001) {
-              // Switch to the liquidation helper for closing full positions
-              try { console.debug(`[AUTOPILOT][DEBUG] switching to LIQUIDATE for full position close of ${symbolClean} (ownedQty=${ownedQty})`); } catch (e) {}
+            // Check if what we want to sell is effectively the whole position or too small to trade
+            if (ownedQty > 0 && (sellQtyRaw >= ownedQty - 0.0001 || ownedQty < 0.0001)) {
+              // Switch to the liquidation helper for closing full positions or dust
+              try { console.debug(`[AUTOPILOT][DEBUG] switching to LIQUIDATE for position close/dust of ${symbolClean} (ownedQty=${ownedQty})`); } catch (e) {}
               response = await fetch("/api/alpaca/liquidate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(getBrokerAuthPayload({ symbol: symbolClean })),
               });
             } else {
+              const sellQtyFloored = Math.floor(sellQtyRaw * 10000) / 10000;
+              if (sellQtyFloored <= 0) {
+                // Return a fake result to stop the loop for this symbol
+                addAutopilotLog(`Skipping SELL ${symbolClean}: quantity ${sellQtyRaw.toFixed(6)} is below fractional floor (0.0001).`, "warn");
+                release(); // Must release mutex!
+                return {
+                  status: "INVALID",
+                  code: "INVALID_QTY",
+                  symbol: symbolClean,
+                  side,
+                  requestedQty: qtyNum,
+                  executedQty: 0,
+                  message: `Sell quantity ${sellQtyRaw.toFixed(6)} is too small to execute.`
+                };
+              }
               equityOrderPayload.qty = sellQtyFloored;
               try { console.debug(`[AUTOPILOT][DEBUG] sending equity SELL as qty=${equityOrderPayload.qty} for ${symbolClean} (ownedQty=${ownedQty}, finalQty=${finalQty})`); } catch (e) {}
               response = await fetch("/api/alpaca/trade", {
