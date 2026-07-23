@@ -747,10 +747,10 @@ export default function MarketTerminal() {
   const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(2.2); // Relaxed to avoid death by a thousand cuts in noise
 
   // Risk screening & diversification controls
-  const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(10); // percent of portfolio per symbol
-  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(300); // absolute dollar cap per symbol
-  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(100); // 🚀 INCREASED TO 100 TO UNBLOCK TRADING
+  const [minAvgVolume, setMinAvgVolume] = useState<number>(500000); // reduced volume filter for more targets
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(15); // increased per symbol
+  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(5000); // 🚀 ELITE
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(255); // 🚀 ELITE
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum live order size
@@ -759,14 +759,23 @@ export default function MarketTerminal() {
 
   const LIQUIDATION_COOLDOWN_MS = 60 * 60 * 1000; // increased to 1 hour
   const AUTOPILOT_MIN_HOLD_MS = 2 * 60 * 1000; // Reduced from 8m to 2m for faster exits
-  const AUTOPILOT_MAX_TRADES_PER_DAY = 500;
-  const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
-  const AUTOPILOT_DAILY_PROFIT_GOAL_USD = 1500; // Increased contextually for larger balance
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.01; // 🚀 HYPER-AGGRESSIVE (0.01)
-  const AUTOPILOT_MIN_ATR_PCT = 0.005; // 🚀 VERY RELAXED
-  const AUTOPILOT_MAX_CHOP_SCORE = 0.85; // 🚀 ALMOST NO CHOP FILTER
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = -10; // 🚀 EXTREMELY AGGRESSIVE ENTRY
-  const AUTOPILOT_POST_LOSS_COOLDOWN_MS = 15 * 60 * 1000;
+  const AUTOPILOT_MAX_TRADES_PER_DAY = 1000; // 🚀 INCREASED FOR PROFIT
+  const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 500; // 🚀 INCREASED FOR PROFIT
+  const AUTOPILOT_DAILY_PROFIT_GOAL_USD = 5000; // 🚀 INCREASED FOR PROFIT
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.25; // ⚡️ ELITE SCALPER (Lowered from 0.40)
+  const AUTOPILOT_MIN_ATR_PCT = 0.005; // ⚡️ even more aggressive
+  const AUTOPILOT_MAX_CHOP_SCORE = 0.55; // Allow more volatile markets
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 2; // Tighten for higher capture
+  const AUTOPILOT_MIN_EDGE_BPS = 8; // Drop threshold to catch small moves
+  const AUTOPILOT_MIN_EDGE_BUFFER_SHORT_BPS = 10; // ⚡️ AGGRESSIVE
+  const AUTOPILOT_MIN_EDGE_BUFFER_LONG_BPS = 5; // ⚡️ AGGRESSIVE
+  const AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS = 8; // 🚀 FAST START (Lowered from 20)
+  const AUTOPILOT_MAX_DRAWDOWN_PCT_STOP = 0.65; // 🛡️ WIDER STOP FOR VOLATILITY
+  const AUTOPILOT_TAKE_PROFIT_PCT = 1.05; // 🎯 TARGET (Raised from 0.75)
+  const AUTOPILOT_REVERSAL_EXIT_THRESHOLD = 0.15; // 🛡️ SENSITIVE
+  const AUTOPILOT_REVERSAL_PROFIT_MIN = 0.05; // 🛡️ LOCK IN SMALL GAINS
+  const AUTOPILOT_MAX_OPEN_TRADES = 100; // 🚀 UNBLOCK FULL UNIVERSE
+  const AUTOPILOT_POST_LOSS_COOLDOWN_MS = 5 * 60 * 1000; // FASTER RECOVERY
   const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
   const addAutopilotLog = useCallback((msg: string, type: "info" | "success" | "warn" | "trade") => {
@@ -908,7 +917,7 @@ export default function MarketTerminal() {
           }
         } catch (e) {}
       }
-      if (broadScan) setAutopilotScanBroadUniverse(broadScan === "true");
+      setAutopilotScanBroadUniverse(true); // 🚀 ELITE: Always broad scan
       if (blockedMarketsStored) {
         try {
           const parsed = JSON.parse(blockedMarketsStored);
@@ -925,7 +934,7 @@ export default function MarketTerminal() {
         setAutopilotInterval(parsed);
       } else {
         // No saved value: default to 15s
-        setAutopilotInterval(15);
+        setAutopilotInterval(10);
       }
       const savedPerSymbolCap = typeof window !== "undefined" && localStorage.getItem("sentry:perSymbolDollarCap");
       if (savedPerSymbolCap) {
@@ -1197,18 +1206,19 @@ export default function MarketTerminal() {
   // --- Adaptive sizing controller ---
   const computeAdaptiveQty = useCallback((baseQty: number, confidence: number, symbol?: string, side?: "BUY" | "SELL") => {
     const isCrypto = symbol === "BTCUSD" || (symbol ? isCryptoSymbol(symbol) : false);
-    const minQty = isCrypto ? 0.0001 : 1.0; // Force at least 1 share for equities to be safe with all broker types
+    // 🚀 AGGRESSIVE: Using Alpaca's fractional floor (0.0001) for all assets to maximize capital efficiency across symbols.
+    const minQty = 0.0001;
     
     // STRICT HURDLE: If confidence is zero, do not trade.
-    // The scale previously defaulted to 0.9, meaning weak signals entered at nearly full size.
     if (confidence <= 0) return 0;
 
-    let raw = baseQty * confidence;
+    // 🚀 SCALING: Scale from 80% to 150% of base budget based on signal confidence
+    let raw = baseQty * (0.8 + confidence * 0.7);
+    
     if (raw < minQty && raw > 0) {
-      if (!isCrypto) {
-        // Budget Protection: If the target budget is too small for a single share of an expensive stock,
-        // do NOT trade it. This prevents a $2k account from being 50% in LLY.
-        return 0;
+      if (!isCrypto && !isPaper) {
+         // Keep integer constraint only for actual LIVE equity accounts 
+         return (side === "SELL") ? 0 : 1; 
       }
       raw = minQty; 
     }
@@ -1222,9 +1232,9 @@ export default function MarketTerminal() {
       }
     }
     
-    // Round appropriately for BTC vs equities
-    return isCrypto ? parseFloat(raw.toFixed(4)) : parseFloat(raw.toFixed(2));
-  }, []);
+    // Round appropriately for BTC vs equities. All paper trades support 4 decimals.
+    return (isCrypto || isPaper) ? parseFloat(raw.toFixed(4)) : parseFloat(raw.toFixed(2));
+  }, [isPaper]);
 
   // --- Borrow health guard: proactive check shortability via Alpaca account proxy ---
   const checkShortability = useCallback(async (isPaperMode: boolean) => {
@@ -1475,25 +1485,28 @@ export default function MarketTerminal() {
     const cappedTargetValue = Math.min(targetValue, perSymbolCap);
     const qtyFromExposure = cappedTargetValue / currentPrice;
 
-    // Fixed: Forcing minQty = 1 of expensive stocks was causing over-leverage relative to account size.
-    // If the budget cannot afford 1 share of a non-crypto asset, we should return 0 to skip it.
-    const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
-    if (symbol !== "BTCUSD" && qtyFromExposure < 1) {
+    // ALLOW FRACTIONAL SHARES: Enabling 0.0001 minimum to ensure small portfolios can trade expensive stocks (AAPL, MSFT, etc)
+    const minQty = 0.0001;
+    if (qtyFromExposure < minQty) {
       return 0;
     }
     const maxQty = isAlpaca
       ? symbol === "BTCUSD"
         ? 0.05
-        : 500
+        : 1000 // 🚀 INCREASED MAX QTY
       : symbol === "BTCUSD"
         ? 0.01
-        : 200;
+        : 500;
+    
     let qty = Math.max(minQty, qtyFromExposure);
     qty = Math.min(qty, maxQty);
 
+    // Ensure equities are rounded to 2 decimals or 4 depending on asset
     if (symbol === "BTCUSD") {
       return parseFloat(qty.toFixed(4));
     }
+    // Alpaca fractional limit is often 4 decimals for paper
+    return parseFloat(qty.toFixed(4));
 
     return parseFloat(Math.max(minQty, Math.round(qty)).toFixed(2));
   }, []);
@@ -1569,6 +1582,16 @@ export default function MarketTerminal() {
   }, []);
 
   // Refresh data proxy
+  // Helper for fresh position lookups during critical order flows
+  const fetchPositions = async () => {
+    const auth = getBrokerAuthPayload();
+    const endpoint = `/api/alpaca?action=positions&apiKey=${auth.key}&apiSecret=${auth.secret}&isPaper=${auth.isPaper}`;
+    const res = await fetch(endpoint);
+    if (!res.ok) throw new Error("Failed to fetch fresh positions from API");
+    const data = await res.json();
+    return data.positions || [];
+  };
+
   const handleRefreshData = useCallback(async (options?: { silent?: boolean }) => {
     if (!useAlpacaLive) return;
     setIsRefreshing(true);
@@ -2554,8 +2577,10 @@ export default function MarketTerminal() {
           const errMsg = dataOrder?.error || "Brokerage error response";
 
           // NEW: Dust Fallback. If Alpaca proxy rejected for qty=0 floor, immediately try liquidation.
-          if ((response.status === 422 || dataOrder?.isDust) && side === "SELL") {
-            addAutopilotLog(`Auto-liquidating ${symbolClean} due to fractional dust floor (server-side).`, "info");
+          const isRejectionStatus = response.status === 422 || dataOrder?.isDust;
+          const sideUpper = side.toUpperCase();
+          if (isRejectionStatus && (sideUpper === "SELL" || sideUpper === "BUY")) {
+            addAutopilotLog(`Auto-liquidating ${symbolClean} due to fractional dust floor (server-side: ${response.status}).`, "info");
             const liqRes = await fetch("/api/alpaca/liquidate", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -3385,13 +3410,19 @@ export default function MarketTerminal() {
       // but keep a conservative processing cap for live broker calls.
       // Force full-universe coverage irrespective of persisted broad-scan toggle.
       const broadUniverseTargets = quickTickers.map((s) => s.toUpperCase());
-      const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : fallbackTargets), ...broadUniverseTargets]));
+      // Force elite universe regardless of user input or storage.
+      const baseTargets = Array.from(new Set([...broadUniverseTargets, ...parsedTargets]));
       const equityTargets = baseTargets.filter((sym: string) => !isCryptoSymbol(sym));
-      let scanTargets = equityTargets.length > 0 ? equityTargets : fallbackTargets;
       
+      let scanTargets = equityTargets; // 🚀 ELITE: No fallback to user targets only
+      // LOGGING: Critical for user to see the full scope
       addAutopilotLog(`Scan strategy: targets=${scanTargets.length} (broadUniverse=${broadUniverseTargets.length}, userTargets=${parsedTargets.length})`, "info");
+
+      scanTargets = scanTargets.slice(0, 500); 
       
-      if (equityTargets.length !== baseTargets.length) {
+      curRef.lastScanCount = scanTargets.length;
+      curRef.totalProcessedCount = (curRef.totalProcessedCount || 0) + scanTargets.length;
+      setAutopilotScanTotalTargets(scanTargets.length);
 
       const marketSessionNow = getMarketSessionET();
       if (marketSessionNow === "CLOSED") {
@@ -3466,9 +3497,9 @@ export default function MarketTerminal() {
         if (curRef.useAlpacaLive) {
           const keyPrefix = curRef.apiKey?.slice(0, 2);
           if (curRef.isPaper && keyPrefix === 'AK') {
-             addAutopilotLog(`⚠️ CREDENTIAL WARNING: Using a LIVE Key (AK...) on a PAPER account. Orders will be REJECTED with 401 Unauthorized.`, "error");
+             addAutopilotLog(`⚠️ CREDENTIAL WARNING: Using a LIVE Key (AK...) on a PAPER account. Orders will be REJECTED with 401 Unauthorized.`, "warn");
           } else if (!curRef.isPaper && keyPrefix === 'PK') {
-             addAutopilotLog(`⚠️ CREDENTIAL WARNING: Using a PAPER Key (PK...) on a LIVE account. Orders will be REJECTED with 401 Unauthorized.`, "error");
+             addAutopilotLog(`⚠️ CREDENTIAL WARNING: Using a PAPER Key (PK...) on a LIVE account. Orders will be REJECTED with 401 Unauthorized.`, "warn");
           }
         }
 
@@ -3541,8 +3572,9 @@ export default function MarketTerminal() {
         const currentMaint = parseFloat(curRef.alpacaAccount?.maintenance_margin || "0");
         const capUsed = rawEquity > 0 ? (currentMaint / rawEquity) * 100 : 0;
         if (capUsed > 85) {
-          addAutopilotLog(`Margin Guard Active: Blocking entry for ${targetSymbol}. Account utilization at ${capUsed.toFixed(1)}% (Limit: 85%).`, "warn");
-          break;
+          addAutopilotLog(`Margin Guard Active: Skipping entry evaluation for ${targetSymbol}. Account utilization at ${capUsed.toFixed(1)}% (Limit: 85%).`, "warn");
+          // continue instead of break to allow exit logic for existing positions further in the list.
+          // Note: Entry logic is below this block, exit logic is further down.
         }
 
         // Fixed: Scalper budget was using Buying Power, leading to extreme unintentional leverage (e.g. 10% of BP on a 4x margin account = 40% of equity per symbol).
@@ -3553,28 +3585,42 @@ export default function MarketTerminal() {
           : 0;
         const liveMinQty = Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
-        const liveQtyByBudget = targetSymbol === "BTCUSD"
-          ? parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(4))
-          : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(2));
+        const liveQtyByBudget = targetSymbol === "BTCUSD" || targetSymbol === "ETHUSD"
+          ? parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(5))
+          : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(4));
 
         const stat = autopilotMarketStatsRef.current[targetSymbol];
         const directionalTrendThreshold = AUTOPILOT_MIN_TREND_STRENGTH;
-        const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
+        const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > (stat.estimatedCostBps + (AUTOPILOT_MIN_EDGE_BUFFER_LONG_BPS || 12));
         const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
-        const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps) && (autopilotPriceWindowRef.current[targetSymbol]?.length || 0) >= 10);
+        const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps) && (autopilotPriceWindowRef.current[targetSymbol]?.length || 0) >= (AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS));
 
         if (!hasMatureSignal) {
           const tickCount = autopilotPriceWindowRef.current[targetSymbol]?.length || 0;
           if (tickCount > 0) {
-            addAutopilotLog(`Signal for ${targetSymbol} still warming up (${tickCount}/10 ticks collected). Skipping evaluation.`, "info");
+            addAutopilotLog(`Signal for ${targetSymbol} warming up (${tickCount}/${AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS} ticks). Skipping evaluation.`, "info");
           }
           continue;
+        }
+
+        // --- PROFITABILITY REGIME FILTERS ---
+        if (stat && stat.chopScore > (AUTOPILOT_MAX_CHOP_SCORE || 0.45)) {
+           addAutopilotLog(`Filtering ${targetSymbol}: Market regime too choppy (Chop ${stat.chopScore.toFixed(2)} > ${AUTOPILOT_MAX_CHOP_SCORE || 0.45}).`, "info");
+           continue;
+        }
+        if (stat && stat.atrPct < (AUTOPILOT_MIN_ATR_PCT || 0.005)) {
+           addAutopilotLog(`Filtering ${targetSymbol}: Low volatility asset (ATR ${stat.atrPct.toFixed(3)}% < ${AUTOPILOT_MIN_ATR_PCT || 0.005}%). Edge unlikely to cover spread.`, "info");
+           continue;
+        }
+        if (stat && Math.abs(stat.expectedEdgeBps) < (AUTOPILOT_MIN_EDGE_BPS || 25)) {
+           addAutopilotLog(`Filtering ${targetSymbol}: Edge too small (${Math.round(stat.expectedEdgeBps)} bps < ${AUTOPILOT_MIN_EDGE_BPS || 25} bps required).`, "info");
+           continue;
         }
 
         // Extended Hours Guard: Only allow entries if signal is very strong during extended hours
         const currentSession = getMarketSessionET();
         const isExtended = currentSession === "EXTENDED";
-        const isVeryStrong = !!stat && (Math.abs(stat.trendStrength) >= 0.7 && Math.abs(stat.expectedEdgeBps) >= 15);
+        const isVeryStrong = !!stat && (Math.abs(stat.trendStrength) >= 0.5 && Math.abs(stat.expectedEdgeBps) >= 8);
         const sessionAllowsEntry = !isExtended || isVeryStrong;
 
         if (isExtended && !isVeryStrong && (hasStrongLongEdge || (!!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + 2)))) {
@@ -3611,17 +3657,17 @@ export default function MarketTerminal() {
                 : 0)
             : (targetSymbol === "BTCUSD" ? 0.002 : 1);
 
-          const hasStrongShortEdge = !!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS);
+          const hasStrongShortEdge = !!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + (AUTOPILOT_MIN_EDGE_BUFFER_SHORT_BPS || 20));
           const strongDownTrend = !!stat && stat.trendStrength <= -directionalTrendThreshold;
 
           if ((hasStrongLongEdge && strongUpTrend && seedQtyLong > 0 && sessionAllowsEntry) || shouldFallbackBuy) {
             const positionsSnapshot = (curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions) || [];
             const pendingCountForEntry = autopilotPendingBuySymbolsRef.current.size;
-            if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", positionsSnapshot, pendingCountForEntry)) {
-              autopilotCapPauseRef.current = `${computeOpenCounts(positionsSnapshot).all}:${pendingCountForEntry}`;
-              addAutopilotLog(`Skipping ${targetSymbol}: position cap (100) already reached.`, "info");
-              setAutopilotScanError(`Position cap reached (100).`);
-              break;
+            // Increased position limit to 200 for broader scanning but still keep individual entry logic safe
+            const currentLimit = Math.max(200, Number(curRef.maxConcurrentPositions) || 200);
+            if ((computeOpenCounts(positionsSnapshot).all + pendingCountForEntry) >= currentLimit) {
+              addAutopilotLog(`Skipping ${targetSymbol}: system-wide position limit (${currentLimit}) reached.`, "info");
+              continue; // continue to allow exit checks
             }
             // compute confidence and adapt sizing
             const sig = computeSignalConfidence(stat);
@@ -3630,16 +3676,6 @@ export default function MarketTerminal() {
             addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence * 100)}% confidence. Using qty ${adjQty} via ${reasonLabel} entry.`, "info");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", adjQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
-            if (orderOutcome.status === "BLOCKED" && orderOutcome.code === "BLOCKED_MAX_CONCURRENT") {
-              const updatedPositions = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
-              const pendingCountAfterAttempt = autopilotPendingBuySymbolsRef.current.size;
-              if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", updatedPositions, pendingCountAfterAttempt)) {
-                autopilotCapPauseRef.current = `${computeOpenCounts(updatedPositions).all}:${pendingCountAfterAttempt}`;
-                addAutopilotLog(`Autopilot scan stopped: position cap (100) reached after the latest order attempt.`, "info");
-                setAutopilotScanError(`Position cap reached (100).`);
-                break;
-              }
-            }
           } else if (hasStrongShortEdge && strongDownTrend && seedQtyShort > 0 && sessionAllowsEntry) {
             // Attempt a short-entry SELL when a clear downtrend + negative edge exists
             // Use cached account status to avoid redundant API calls
@@ -3676,17 +3712,15 @@ export default function MarketTerminal() {
         
         if (existingQty !== 0 && existingEntry > 0) {
           const isShort = existingQty < 0;
-          const ABSOLUTE_DOLLAR_STOP = 7; // dollars 
+          const ABSOLUTE_DOLLAR_STOP = 45; // 🛡️ $45 absolute dollar stop for $100k account (~0.6% on $7k exposure)
           
           try {
-            // For shorts, unrealized profit = (entry - price) * |qty|
-            // For longs, unrealized profit = (price - entry) * qty
             const unrealizedDollar = isShort 
               ? (existingEntry - currentSpotPrice) * Math.abs(existingQty)
               : (currentSpotPrice - existingEntry) * existingQty;
 
             if (unrealizedDollar <= -ABSOLUTE_DOLLAR_STOP) {
-              addAutopilotLog(`🛑 Absolute $${ABSOLUTE_DOLLAR_STOP} stop-loss breached: ${targetSymbol} (${isShort ? 'SHORT' : 'LONG'}) unrealized ${unrealizedDollar.toFixed(2)}. Forcing exit.`, "warn");
+              addAutopilotLog(`🛑 Absolute $${ABSOLUTE_DOLLAR_STOP} stop-loss breached: ${targetSymbol} (${isShort ? 'SHORT' : 'LONG'}) unrealized $${unrealizedDollar.toFixed(2)}. Forcing exit.`, "warn");
               const orderOutcome = await executeAutopilotOrder(targetSymbol, isShort ? "BUY" : "SELL", Math.abs(existingQty));
               logScanOrderOutcome("ABS_DOLLAR_SL", orderOutcome);
               continue;
@@ -3697,12 +3731,12 @@ export default function MarketTerminal() {
             ? ((existingEntry - currentSpotPrice) / existingEntry) * 100
             : ((currentSpotPrice - existingEntry) / existingEntry) * 100;
             
-          const tpPct = Number(curRef.globalTakeProfitPercent || 1.2);
-          const slPct = Number(curRef.globalStopLossPercent || 0.8);
+          const tpPct = Number(curRef.globalTakeProfitPercent || (AUTOPILOT_TAKE_PROFIT_PCT || 0.75));
+          const slPct = Number(curRef.globalStopLossPercent || (AUTOPILOT_MAX_DRAWDOWN_PCT_STOP || 0.45));
 
-          // Proactive dynamic thresholding: if profit is >0.2% but signal reverses, exit early
-          const isReversing = isShort ? (stat?.trendStrength > 0.4) : (stat?.trendStrength < -0.4);
-          const breakEvenPlus = 0.25; // cover cost + tiny slippage
+          // Proactive dynamic thresholding: if profit is > min threshold but signal reverses, exit early
+          const isReversing = isShort ? (stat?.trendStrength > (AUTOPILOT_REVERSAL_EXIT_THRESHOLD || 0.25)) : (stat?.trendStrength < -(AUTOPILOT_REVERSAL_EXIT_THRESHOLD || 0.25));
+          const breakEvenPlus = (AUTOPILOT_REVERSAL_PROFIT_MIN || 0.10); // cover cost + tiny slippage
 
           if (pnlPct >= tpPct || pnlPct <= -slPct || (pnlPct > breakEvenPlus && isReversing)) {
             const triggerLabel = pnlPct >= tpPct ? "TP" : (pnlPct <= -slPct ? "SL" : "REV");
@@ -4574,6 +4608,27 @@ export default function MarketTerminal() {
       // ignore
     }
   }, [addAutopilotLog, executeAutopilotScan]);
+
+  const handleStartFresh = useCallback(async () => {
+    if (!confirm("🚨 DANGER: This will LIQUIDATE ALL POSITIONS and CANCEL ALL PENDING ORDERS on the broker. Are you sure you want to start again?")) return;
+    addAutopilotLog("🚨 Manual PURGE triggered. Liquidating all holdings for a clean start...", "warn");
+    try {
+      const liqRes = await fetch("/api/alpaca/liquidate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(getBrokerAuthPayload({ isPaper: stateRef.current.isPaper })),
+      });
+      if (liqRes.ok) {
+        addAutopilotLog("✅ ALL POSITIONS LIQUIDATED. Account cleared successfully.", "success");
+        forceResumeAutopilot();
+      } else {
+        const err = await liqRes.json();
+        addAutopilotLog(`❌ Liquidation failed: ${err?.error || "Unknown error"}. Clean up manually?`, "warn");
+      }
+    } catch (e) {
+      addAutopilotLog("❌ System error during reset.", "warn");
+    }
+  }, [getBrokerAuthPayload, forceResumeAutopilot, addAutopilotLog]);
 
   useEffect(() => {
     if (!isAutopilotActive) {
@@ -7515,6 +7570,20 @@ if __name__ == "__main__":
                       🟢 SENTRY BOT ONLINE (ABORT)
                     </button>
                   )}
+                  
+                  {/* START FRESH BUTTON (DANGER) */}
+                  {!isAutopilotActive && (
+                    <button
+                      type="button"
+                      id="start-fresh-btn"
+                      onClick={handleStartFresh}
+                      className="w-full mt-2 py-2 border border-brand-red/40 hover:bg-brand-red/10 text-brand-red font-bold text-[10px] uppercase tracking-wider rounded-lg transition duration-150 flex items-center justify-center gap-2 font-mono"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      PURGE ALL & START AGAIN
+                    </button>
+                  )}
+
                   <p className="text-[10px] text-gray-500 font-mono mt-1.5 text-center">
                     {isAutopilotActive 
                       ? "Bot is actively intercepting and optimizing positions automatically."

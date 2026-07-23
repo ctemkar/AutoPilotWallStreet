@@ -108,6 +108,14 @@ export async function POST(req: Request) {
         const originalQty = finalQty;
         finalQty = Math.floor(finalQty * 10000) / 10000;
         console.log(`[ALPACA_SAFETY] Floored ${symbol} SELL qty from ${originalQty} to ${finalQty}`);
+        
+        if (finalQty <= 0) {
+          return NextResponse.json(
+            { error: `Market sell rejected: quantity ${originalQty} floored to 0. Please use liquidation to clear dust.`, isDust: true },
+            { status: 422 }
+          );
+        }
+      }
       }
       payload.qty = finalQty.toString();
 
