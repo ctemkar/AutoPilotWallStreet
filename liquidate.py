@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv(".env.local")
 
-client = TradingClient(os.getenv("ALPACA_KEY"), os.getenv("ALPACA_SECRET"), paper=True)
+client = TradingClient(os.getenv("ALPACA_PAPER_KEY") or os.getenv("ALPACA_PAPER_API_KEY"), os.getenv("ALPACA_PAPER_SECRET") or os.getenv("ALPACA_PAPER_API_SECRET"), paper=True)
 
 # cancel_orders=True ensures all existing orders for the positions are cancelled
 # before the liquidation attempts.

@@ -63,9 +63,11 @@ export async function POST(req: Request) {
     const hasQty = qty && parseFloat(qty) > 0;
     const hasNotional = notional && parseFloat(notional) > 0;
 
-    if (!symbol || (!hasQty && !hasNotional) || !["buy", "sell"].includes(side)) {
+    const action = side.toLowerCase();
+
+    if (!symbol || (!hasQty && !hasNotional) || !["buy", "sell"].includes(action)) {
       return NextResponse.json(
-        { error: "Invalid trading parameters. Verify symbol, Quantity/USD, and Action." },
+        { error: `Invalid trading parameters. Verify symbol, Quantity/USD, and Action (received side=${side}).` },
         { status: 200 }
       );
     }
@@ -84,7 +86,7 @@ export async function POST(req: Request) {
     const symbolUpper = symbol.toUpperCase();
     const payload: any = {
       symbol: symbolUpper,
-      side: side,
+      side: action,
       type: "market",
       time_in_force: "day",
     };
@@ -102,7 +104,7 @@ export async function POST(req: Request) {
 
       // Alpaca strictly rejects SELL orders if the decimal count exceeds available balance.
       // We apply a universal 4-decimal floor to prevent these fractional dust errors.
-      if (side === "sell") {
+      if (action === "sell") {
         const originalQty = finalQty;
         finalQty = Math.floor(finalQty * 10000) / 10000;
         console.log(`[ALPACA_SAFETY] Floored ${symbol} SELL qty from ${originalQty} to ${finalQty}`);
