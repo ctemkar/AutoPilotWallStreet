@@ -98,6 +98,12 @@ export async function POST(req: Request) {
       if (side === "sell") {
         finalQty = Math.floor(finalQty * 10000) / 10000;
         console.log(`[ALPACA_SAFETY] Floored ${symbol} SELL qty from ${qty} to ${finalQty}`);
+        if (finalQty <= 0) {
+          return NextResponse.json(
+            { error: `Sell quantity ${qty} is too small after rounding to 4 decimals. Alpaca requires qty > 0.` },
+            { status: 422 }
+          );
+        }
       }
       payload.qty = finalQty.toString();
     }
