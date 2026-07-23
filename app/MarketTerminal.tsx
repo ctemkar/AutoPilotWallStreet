@@ -657,7 +657,7 @@ export default function MarketTerminal() {
 
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(true);
-  const [autopilotAutoStart, setAutopilotAutoStart] = useState<boolean>(true);
+  const [autopilotAutoStart, setAutopilotAutoStart] = useState<boolean>(false);
   const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT" | "ELLIOTT_WAVE">("SCALPER");
 
   // Elliott Wave state map for tracking wave counts per symbol
@@ -2552,6 +2552,28 @@ export default function MarketTerminal() {
 
         if (!response.ok || dataOrder?.error) {
           const errMsg = dataOrder?.error || "Brokerage error response";
+
+          // NEW: Dust Fallback. If Alpaca proxy rejected for qty=0 floor, immediately try liquidation.
+          if ((response.status === 422 || dataOrder?.isDust) && side === "SELL") {
+            addAutopilotLog(`Auto-liquidating ${symbolClean} due to fractional dust floor (server-side).`, "info");
+            const liqRes = await fetch("/api/alpaca/liquidate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(getBrokerAuthPayload({ symbol: symbolClean })),
+            });
+            if (liqRes.ok) {
+              return {
+                status: "FILLED",
+                code: "FILLED",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: "Dust cleared via liquidation."
+              };
+            }
+          }
+
           // If Binance reports insufficient USDT, surface a UI warning and throttle repeated logs.
           if (/insufficient\s+usdt/i.test(errMsg) || /insufficient\s+preferred\s+usdt/i.test(errMsg) || /insufficient.*usdt/i.test(errMsg)) {
             const now = Date.now();
@@ -3336,16 +3358,16 @@ export default function MarketTerminal() {
       const currentCapacity = currentTotalEquity > 0 ? (currentMaintMargin / currentTotalEquity) * 100 : 0;
 
       const currentOpenCounts = computeOpenCounts(currentActivePositions);
-      // FORCED OVERRIDE: Increase position limit to 100 to clear the backlog of 50 positions.
-      const maxOpenPositions = Math.max(100, Number(curRef.maxConcurrentPositions) || 100);
+      // Increased position limit to 200 to ensure broad scanning is never blocked.
+      const maxOpenPositions = Math.max(200, Number(curRef.maxConcurrentPositions) || 200);
       const pendingBuyCount = autopilotPendingBuySymbolsRef.current.size;
       const positionCapReached = maxOpenPositions > 0 && (currentOpenCounts.all + pendingBuyCount) >= maxOpenPositions;
 
       if (positionCapReached) {
         autopilotCapPauseRef.current = `${currentOpenCounts.all}:${pendingBuyCount}`;
-        addAutopilotLog(`Autopilot scan paused: position cap (${maxOpenPositions}) already reached (${currentOpenCounts.all} open + ${pendingBuyCount} pending).`, "info");
-        setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
-        return;
+        addAutopilotLog(`Autopilot position cap (${maxOpenPositions}) reached (${currentOpenCounts.all} open + ${pendingBuyCount} pending). New BUY entries will be paused, but scanning continues for exits.`, "info");
+        setAutopilotScanError(`Position cap reached (${maxOpenPositions}). Entry paused.`);
+        // Do NOT return here. We must continue to evaluate SELL logic for existing positions.
       }
 
       autopilotCapPauseRef.current = null;
@@ -3366,9 +3388,10 @@ export default function MarketTerminal() {
       const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : fallbackTargets), ...broadUniverseTargets]));
       const equityTargets = baseTargets.filter((sym: string) => !isCryptoSymbol(sym));
       let scanTargets = equityTargets.length > 0 ? equityTargets : fallbackTargets;
+      
+      addAutopilotLog(`Scan strategy: targets=${scanTargets.length} (broadUniverse=${broadUniverseTargets.length}, userTargets=${parsedTargets.length})`, "info");
+      
       if (equityTargets.length !== baseTargets.length) {
-        addAutopilotLog("Wall Street equities only: removed crypto symbols from scan targets.", "info");
-      }
 
       const marketSessionNow = getMarketSessionET();
       if (marketSessionNow === "CLOSED") {
@@ -3406,16 +3429,16 @@ export default function MarketTerminal() {
         return;
       }
 
-      // In broad-universe mode, process a chunk of the target list each scan cycle.
-      // Capped at 120 to allow full universe coverage as requested by the user.
-      const DEFAULT_SCAN_BATCH_SIZE = 120;
+      // In broad-universe mode, process the full target list each scan cycle.
+      // Increased to 500 to allow full universe coverage as requested by the user.
+      const DEFAULT_SCAN_BATCH_SIZE = 500;
       const maxTargetsPerScan = autopilotScanBroadUniverse 
         ? Math.min(scanTargets.length, DEFAULT_SCAN_BATCH_SIZE) 
         : 1;
 
       if (curRef.useAlpacaLive && autopilotScanBroadUniverse) {
         if (!liveBroadWarningLoggedRef.current) {
-          addAutopilotLog(`Broad Universe Scan enabled in LIVE mode — processing full universe (${maxTargetsPerScan} targets) each scan. Monitor broker/API rate limits.`, "warn");
+          addAutopilotLog(`Broad Universe Scan enabled in LIVE mode — processing full universe (${maxTargetsPerScan} targets) each scan.`, "warn");
           liveBroadWarningLoggedRef.current = true;
         }
       }
@@ -3426,19 +3449,13 @@ export default function MarketTerminal() {
 
       for (const targetSymbol of processedScanTargets) {
         const iterationRef = stateRef.current;
-        // FORCED OVERRIDE: Increase position limit to 100 to clear the backlog of 50 positions.
-        const maxOpenPositionsForTarget = Math.max(100, Number(iterationRef.maxConcurrentPositions) || 100);
         const currentActivePositionsForIteration: Position[] = (iterationRef.useAlpacaLive ? iterationRef.alpacaPositions : iterationRef.mockPositions) || [];
         const livePositionsSnapshot = currentActivePositionsForIteration;
         const currentPending = autopilotPendingBuySymbolsRef.current.size;
-        const capReachedBeforeTarget = shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", livePositionsSnapshot, currentPending);
-        if (capReachedBeforeTarget) {
-          autopilotCapPauseRef.current = `${computeOpenCounts(livePositionsSnapshot).all}:${currentPending}`;
-          addAutopilotLog(`Autopilot scan paused: position cap (${maxOpenPositionsForTarget}) already reached before evaluating ${targetSymbol}.`, "info");
-          setAutopilotScanError(`Position cap reached (${maxOpenPositionsForTarget}).`);
-          break;
-        }
-
+        
+        // Only block if we are actually trying to BUY. Let the signal evaluation determine side.
+        // We'll check the cap again specifically before the BUY execution.
+        
         setAutopilotCurrentScanTarget(targetSymbol);
         setAutopilotScanProcessedCount((prev) => prev + 1);
 
@@ -4536,6 +4553,15 @@ export default function MarketTerminal() {
       // Reset running flags in case it got stuck
       autopilotRunningRef.current = false;
       setIsAutopilotRunning(false);
+      setAutopilotLogs([]);
+      autopilotTargetSymbolIndexRef.current = 0;
+      autopilotPriceWindowRef.current = {};
+      autopilotMarketStatsRef.current = {};
+      setAutopilotTargetTicker(DEFAULT_AUTOPILOT_TARGET_TICKERS);
+      
+      addAutopilotLog("SYSTEM RESET: Cleared logs, reset scan indices, wiped signal memory, and RESTORED FULL TICKER UNIVERSE. Restarting fresh scanning...", "success");
+      
+      void executeAutopilotScan();
       
       // Activate and trigger immediate scan
       setIsAutopilotActive(true);
@@ -4683,7 +4709,7 @@ export default function MarketTerminal() {
     if (savedApiKey) setApiKey(savedApiKey);
     if (savedApiSecret) setApiSecret(savedApiSecret);
     
-    // Forced Paper Mode per user request for initial verification
+    // Forced Paper Mode per user request for safety & stability
     localStorage.setItem("APCA_IS_PAPER", "true");
     setIsPaper(true);
 
@@ -4699,23 +4725,15 @@ export default function MarketTerminal() {
     const ts = HYDRATION_SAFE_TIME_PLACEHOLDER;
 
     const initApp = async () => {
-      let effectiveIsPaper = savedIsPaper === null ? true : savedIsPaper;
+      // Overriding to true as requested
+      let effectiveIsPaper = true;
 
       try {
         const resp = await fetch("/api/alpaca/inspect");
         if (resp.ok) {
           const info = await resp.json();
           const present = info?.envKeysPresent || {};
-          const hasLive = !!present.ALPACA_LIVE_API_KEY || !!present.ALPACA_LIVE_API_SECRET || !!present.ALPACA_API_KEY || !!present.ALPACA_API_SECRET || !!present.ALPACA_KEY || !!present.ALPACA_SECRET;
-          const hasPaper = !!present.ALPACA_PAPER_API_KEY || !!present.ALPACA_PAPER_API_SECRET;
-          if (hasLive && !hasPaper) {
-            if (effectiveIsPaper) {
-              effectiveIsPaper = false;
-              setIsPaper(false);
-              localStorage.setItem("APCA_IS_PAPER", "false");
-              addLog("ALPACA", "AUTO_SWITCH", "No paper keys found on server; defaulting Alpaca mode to Live.", "INFO");
-            }
-          }
+          // Skip switching to live mode even if keys are missing - per user request to use paper
         }
       } catch (e) {
         // ignore detection failures — keep defaults
@@ -4741,20 +4759,8 @@ export default function MarketTerminal() {
       ]);
 
       try {
-        if (rawSavedIsPaper === null) {
-          const resp = await fetch("/api/alpaca/inspect");
-          if (resp.ok) {
-            const info = await resp.json();
-            const present = info?.envKeysPresent || {};
-            const hasLive = !!present.ALPACA_LIVE_API_KEY || !!present.ALPACA_LIVE_API_SECRET;
-            const hasPaper = !!present.ALPACA_PAPER_API_KEY || !!present.ALPACA_PAPER_API_SECRET;
-            if (hasLive && !hasPaper) {
-              setIsPaper(false);
-              localStorage.setItem("APCA_IS_PAPER", "false");
-              addLog("ALPACA", "AUTO_SWITCH", "No paper keys found on server; defaulting Alpaca mode to Live.", "INFO");
-            }
-          }
-        }
+        // Alpaca connectivity check
+        void handleRefreshData({ silent: true });
       } catch (e) {
         // ignore detection failures — keep defaults
       }

@@ -113,7 +113,11 @@ export async function POST(req: Request) {
 
       if (parseFloat(payload.qty) <= 0) {
         return NextResponse.json(
-          { error: `Rejected: qty must be > 0 (calculated: ${finalQty}, original: ${qty}). Use liquidate to clear tiny dust.` },
+          { 
+            error: `Rejected: qty must be > 0 (calculated: ${finalQty}, original: ${qty}). Use the 'Liquidate' button or the /api/alpaca/liquidate endpoint to clear tiny dust that cannot be rounded to 4 decimals.`,
+            isDust: true,
+            symbol: symbolUpper
+          },
           { status: 422 }
         );
       }
