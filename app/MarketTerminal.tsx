@@ -3410,6 +3410,8 @@ export default function MarketTerminal() {
       // but keep a conservative processing cap for live broker calls.
       // Force full-universe coverage irrespective of persisted broad-scan toggle.
       const broadUniverseTargets = quickTickers.map((s) => s.toUpperCase());
+      console.log("DEBUG SCAN: broadUniverseTargets.length =", broadUniverseTargets.length);
+      console.log("DEBUG SCAN: quickTickers.length =", quickTickers.length);
       // Force elite universe regardless of user input or storage.
       const baseTargets = Array.from(new Set([...broadUniverseTargets, ...parsedTargets]));
       const equityTargets = baseTargets.filter((sym: string) => !isCryptoSymbol(sym));
