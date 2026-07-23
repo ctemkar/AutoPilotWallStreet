@@ -108,14 +108,15 @@ export async function POST(req: Request) {
         const originalQty = finalQty;
         finalQty = Math.floor(finalQty * 10000) / 10000;
         console.log(`[ALPACA_SAFETY] Floored ${symbol} SELL qty from ${originalQty} to ${finalQty}`);
-        if (finalQty <= 0) {
-          return NextResponse.json(
-            { error: `Rejected: SELL quantity ${originalQty} floored to zero (min 0.0001). Use liquidate to clear tiny dust.` },
-            { status: 422 }
-          );
-        }
       }
       payload.qty = finalQty.toString();
+
+      if (parseFloat(payload.qty) <= 0) {
+        return NextResponse.json(
+          { error: `Rejected: qty must be > 0 (calculated: ${finalQty}, original: ${qty}). Use liquidate to clear tiny dust.` },
+          { status: 422 }
+        );
+      }
     }
 
     const etNow = getEtDate();
@@ -132,7 +133,7 @@ export async function POST(req: Request) {
 
     if (canUseExtendedEquityPath) {
       const px = parseFloat(String(estimatedPrice));
-      const adjustedLimit = side === "buy"
+      const adjustedLimit = action === "buy"
         ? px * 1.02
         : px * 0.98;
 

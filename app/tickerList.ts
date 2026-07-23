@@ -9,5 +9,11 @@ export const quickTickers = [
   "MDB", "ZS", "OKTA", "TTD", "SE", "SHOP", "NET", "AFRM", "PLTR", "U",
   "RBLX", "DKNG", "COIN", "HOOD", "ABNB", "DASH", "SQ", "ROKU", "TDOC", "TWLO",
   "CRWD", "Z", "PATH", "GME", "AMC", "BB", "NOK", "SPY", "QQQ", "IWM",
-  "DIA", "VXX",
+  "DIA", "VXX", "PFE", "JPM", "V", "MA", "UNH", "HD", "PG", "DIS",
+  "BAC", "VZ", "ADBE", "CRM", "XOM", "CVX", "KO", "ABT", "CSCO", "MCD",
+  "T", "WMT", "NKE", "LLY", "ABBV", "MRK", "ORCL", "ACN", "AVGO", "COST",
+  "TMO", "DHR", "MDT", "NEE", "LIN", "PM", "TXN", "NXT", "AMAT", "LOW",
+  "RTX", "HON", "IBM", "INTU", "GS", "MS", "BLK", "NOW", "AXP", "GE",
+  "CAT", "DE", "MMM", "UPS", "FDX", "LMT", "BA", "GD", "NOC", "WM",
+  "SPGI", "ZTS", "PLD", "AMT", "CCI", "EQIX", "DLR", "PSA", "O", "WELL",
 ];

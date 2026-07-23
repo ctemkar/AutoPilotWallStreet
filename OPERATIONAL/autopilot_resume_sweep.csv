@@ -1,2 +1,0 @@
-source,action,qty,reason,sandbox,raw
-autopilot_resume_sweep.json,HOLD,1,"Portfolio metrics are undefined; holding position to avoid uncalculated risk.",false,"{\"action\":\"HOLD\",\"qty\":1,\"reason\":\"Portfolio metrics are undefined; holding position to avoid uncalculated risk.\",\"sandbox\":false}"

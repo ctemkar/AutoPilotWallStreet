@@ -52,3 +52,38 @@ serverless/
 /.serverless/
 /.awcache/
 
+
+# Operational logs and Autopilot state
+OPERATIONAL/*.json
+OPERATIONAL/*.jsonl
+OPERATIONAL/*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+.venv/
+venv/
+ENV/
+env/
+
+# Data and Backups
+*.zip
+*.tar.gz
+*.db
+path:
+root@*
+metadata.json
+
+# Local scripts/debug
+audit_budget.js
+prune_tickers.js
+run_ai_diagnostics.js
+test_gemini.js
+final_test.py
+verify_env.py
+
+# Additional environment patterns
+.env.production
+.env.staging
+.env.development

@@ -1,2 +1,0 @@
-source,action,qty,reason,sandbox,raw
-autopilot_broad_resume_sweep.json,BUY,5,"Initiating a small starter position in RELIANCE to establish market presence.",false,"{\"action\":\"BUY\",\"qty\":5,\"reason\":\"Initiating a small starter position in RELIANCE to establish market presence.\",\"sandbox\":false}"
