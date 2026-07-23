@@ -749,8 +749,11 @@ export default function MarketTerminal() {
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(100000); // reduced volume filter for more targets
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(15); // increased per symbol
-  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(5000); // 🚀 ELITE
+  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(20000); // 🚀 ELITE
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(255); // 🚀 ELITE
+  
+  // 🚀 ELITE: Hard override to ensure 255 positions even if storage is hijacked
+  const effectiveMaxConcurrent = Math.max(255, maxConcurrentPositions);
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum live order size
@@ -790,7 +793,8 @@ export default function MarketTerminal() {
         msg,
         type
       };
-      return [newLog, ...prev].slice(0, 50);
+      // Elite: Increased log buffer to ensure full 238-symbol scan cycles can be reviewed in the history.
+      return [newLog, ...prev].slice(0, 500);
     });
     try {
       // Only show toast notifications for significant autopilot events.
@@ -870,7 +874,9 @@ export default function MarketTerminal() {
         }
       }
       if (targetStored) {
-        setAutopilotTargetTicker(targetStored.toUpperCase().trim());
+        // 🚀 ELITE: Clean and deduplicate target list
+        const uniqueSet = Array.from(new Set(targetStored.toUpperCase().split(",").map(s => s.trim()).filter(Boolean)));
+        setAutopilotTargetTicker(uniqueSet.join(","));
       }
       const autoStartEnabled = autoStartStored === null ? true : autoStartStored === "true";
       setAutopilotAutoStart(autoStartEnabled);
@@ -899,7 +905,8 @@ export default function MarketTerminal() {
       if (maxConcurrentStored !== null && maxConcurrentStored !== false) {
         const val = parseInt(maxConcurrentStored as string, 10);
         if (Number.isFinite(val)) {
-          setMaxConcurrentPositions(Math.max(1, val));
+          // 🚀 ELITE: Force minimum of 255 for high-velocity scalping
+          setMaxConcurrentPositions(val < 255 ? 255 : val);
         }
       }
       const autoLiquidateStored = typeof window !== "undefined" && localStorage.getItem("sentry:autoLiquidateBeforeClose");
@@ -1743,7 +1750,7 @@ export default function MarketTerminal() {
     minAvgVolume,
     maxExposurePercentPerSymbol,
     perSymbolDollarCap,
-    maxConcurrentPositions,
+    maxConcurrentPositions: effectiveMaxConcurrent,
     liveMinOrderQty,
   });
 
@@ -1781,7 +1788,7 @@ export default function MarketTerminal() {
       minAvgVolume,
       maxExposurePercentPerSymbol,
       perSymbolDollarCap,
-      maxConcurrentPositions,
+      maxConcurrentPositions: effectiveMaxConcurrent,
       liveMinOrderQty,
       blockedMarkets,
     };
@@ -1812,7 +1819,7 @@ export default function MarketTerminal() {
     globalStopLossPercent,
     minAvgVolume,
     maxExposurePercentPerSymbol,
-    maxConcurrentPositions,
+    effectiveMaxConcurrent,
     autopilotBlacklist,
     liveMinOrderQty,
     blockedMarkets,
@@ -2065,7 +2072,8 @@ export default function MarketTerminal() {
         const _existingLongEarly = _activeEarly.find((p: any) => p.symbol === symbolClean && parseFloat(p.qty || 0) > 0);
         const pendingSymbolsArr = Array.from(autopilotPendingBuySymbolsRef.current || []);
         const _pendingCount = pendingSymbolsArr.length;
-        const _limitEarly = curRef.maxConcurrentPositions || 999;
+        // 🚀 ELITE: Use a sane minimum of 200 for broad scanning
+        const _limitEarly = Math.max(200, curRef.maxConcurrentPositions || 200);
         const _openRelevantEarly = _openCountEarlyAll;
         if (side === "BUY" && !_existingLongEarly && _openRelevantEarly + _pendingCount >= _limitEarly) {
           console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevantEarly=${_openRelevantEarly}, pending=${_pendingCount}, limit=${_limitEarly}, openAll=${_openCountEarlyAll}`);
@@ -2093,7 +2101,8 @@ export default function MarketTerminal() {
       const openCountAll = counts.all;
       const existingLong = activePositions.find((p: any) => p.symbol === symbolClean && parseFloat(p.qty || 0) > 0);
       // Allow adding to an already-open symbol even when the concurrent-position ceiling is reached.
-      const limit = curRef.maxConcurrentPositions || 999;
+      // 🚀 ELITE: Use a sane minimum of 200 for broad scanning
+      const limit = Math.max(200, curRef.maxConcurrentPositions || 200);
       const openRelevant = openCountAll;
       if (side === "BUY" && !existingLong && openRelevant >= limit) {
         console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevant=${openRelevant}, limit=${limit}, openAll=${openCountAll}`);
@@ -3383,8 +3392,8 @@ export default function MarketTerminal() {
       const currentCapacity = currentTotalEquity > 0 ? (currentMaintMargin / currentTotalEquity) * 100 : 0;
 
       const currentOpenCounts = computeOpenCounts(currentActivePositions);
-      // Increased position limit to 200 to ensure broad scanning is never blocked.
-      const maxOpenPositions = Math.max(200, Number(curRef.maxConcurrentPositions) || 200);
+      // Increased position limit to 255 to ensure broad scanning is never blocked.
+      const maxOpenPositions = Math.max(255, Number(curRef.maxConcurrentPositions) || 255);
       const pendingBuyCount = autopilotPendingBuySymbolsRef.current.size;
       const positionCapReached = maxOpenPositions > 0 && (currentOpenCounts.all + pendingBuyCount) >= maxOpenPositions;
 
@@ -3456,7 +3465,8 @@ export default function MarketTerminal() {
       setAutopilotScanError(null);
       setAutopilotScanErrorCount(0);
 
-      const maxPendingBuyThreshold = 10;
+      // Elite: Increased pending threshold to avoid stalling on the large 238-symbol universe.
+      const maxPendingBuyThreshold = 50;
       if (pendingBuyCount >= maxPendingBuyThreshold) {
         addAutopilotLog(`Paused autopilot scan: ${pendingBuyCount} pending broker buy confirmations remain. Waiting for fills before new entries.`, "warn");
         return;
@@ -5958,6 +5968,10 @@ if __name__ == "__main__":
           equity: totalEquity,
           buyingPower: activeCash * simLeverageLimit,
           leverage: currentLeverage.toFixed(2),
+          warnThreshold,
+          criticalThreshold,
+          maxExposurePercentPerSymbol,
+          strategy: autopilotStrategy,
         }),
       });
 

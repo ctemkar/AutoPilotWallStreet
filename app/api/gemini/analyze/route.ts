@@ -41,7 +41,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid JSON body provided." }, { status: 400 });
   }
 
-  const { positions, cash, equity, buyingPower, leverage } = body;
+  const { positions, cash, equity, buyingPower, leverage, warnThreshold, criticalThreshold, maxExposurePercentPerSymbol, strategy } = body;
 
   // 1. Primary Fallback: No API Key configured
   if (!apiKey) {
@@ -51,46 +51,61 @@ export async function POST(req: Request) {
 
   try {
     // Initialize modern @google/genai client
-    const genAI = new GoogleGenAI(apiKey);
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash",
-      generationConfig: {
-        maxOutputTokens: 1000,
-        temperature: 0.7,
-      }
+    const genAI = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
     });
 
     const activePositionsStr = Array.isArray(positions) && positions.length > 0
       ? positions.map((p: any) => `- **${p.symbol}**: Qty ${p.qty} | Current Price $${p.current_price} | Entry Price $${p.avg_entry_price} | Market Value $${p.market_value?.toFixed(2) || (p.qty * p.current_price).toFixed(2)}`).join("\n")
       : "No active holdings (fully liquid in Cash).";
 
-    const prompt = `You are a senior portfolio risk analyst. Produce a concise but high-signal diagnostic for this account.
+    const prompt = `You are a senior portfolio risk analyst and automated algorithm optimizer. Produce a concise, high-signal diagnostic and parameter refinement report.
 
-Account Details:
+Account Context:
 - Portfolio Total Equity: $${equity}
 - Cash Balance: $${cash}
 - Net Buying Power: $${buyingPower}
 - Portfolio Leverage: ${leverage}x
+- Current Strategy: ${strategy}
+
+Current Autopilot Thresholds:
+- Position Warn Threshold: ${warnThreshold}%
+- Position Critical Threshold: ${criticalThreshold}%
+- Max Exposure per Symbol: ${maxExposurePercentPerSymbol}%
 - Active Positions:
 ${activePositionsStr}
 
 Requirements:
-1. Start with a one-line overall risk verdict.
-2. Provide a compact stress-test matrix for -10%, -20%, and -30% market shocks.
-3. Identify the top 3 risk drivers and explain why they matter.
-4. Flag any concentration, margin, or liquidity issues explicitly.
-5. End with 3 concrete mitigation actions the trader should take immediately.
-6. Keep the tone professional, practical, and direct.
-7. Do not mention that you are an AI or use generic filler. Use precise language and numbers where possible.`;
+1. RISK VERDICT: One-line overall risk assessment.
+2. NUMERIC RISK SIGNALS: Extract exact numbers for:
+   - Concentration Risk (Max weight of single asset)
+   - Liquidity Risk (Cash/Equity ratio)
+   - Leverage Risk (Maintenance Margin / Equity)
+3. THRESHOLD COMPARISON: Compare current signals against the provided thresholds (${warnThreshold}%, ${criticalThreshold}%, etc.).
+4. PARAMETER CHANGES: Return exact recommended changes to specific autopilot parameters (e.g., "Change Max Exposure per Symbol from ${maxExposurePercentPerSymbol}% to 8%") to optimize for current market volatility.
+5. STRESS TEST: Matrix for -10%, -20%, and -30% market shocks.
+
+Keep the tone professional, deterministic, and direct. No conversational filler.`;
 
     let responseText = "";
     let lastError: any = null;
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        responseText = response.text();
+        const result = await genAI.models.generateContent({
+          model: "gemini-1.5-flash",
+          contents: prompt,
+          generationConfig: {
+            maxOutputTokens: 1000,
+            temperature: 0.2, // 🚀 ELITE: Lower temperature for more deterministic risk signals
+          }
+        });
+        responseText = result.text;
         if (responseText) break;
       } catch (apiErr: any) {
         lastError = apiErr;
