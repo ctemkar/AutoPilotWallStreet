@@ -743,11 +743,11 @@ export default function MarketTerminal() {
   const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
-  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(3.5); // Relaxed for better trend capture
-  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(2.2); // Relaxed to avoid death by a thousand cuts in noise
+  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(3.0); // Tighter for high-velocity scalping
+  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(1.8); // Managed risk
 
   // Risk screening & diversification controls
-  const [minAvgVolume, setMinAvgVolume] = useState<number>(500000); // reduced volume filter for more targets
+  const [minAvgVolume, setMinAvgVolume] = useState<number>(100000); // reduced volume filter for more targets
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(15); // increased per symbol
   const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(5000); // 🚀 ELITE
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(255); // 🚀 ELITE
@@ -762,14 +762,14 @@ export default function MarketTerminal() {
   const AUTOPILOT_MAX_TRADES_PER_DAY = 1000; // 🚀 INCREASED FOR PROFIT
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 500; // 🚀 INCREASED FOR PROFIT
   const AUTOPILOT_DAILY_PROFIT_GOAL_USD = 5000; // 🚀 INCREASED FOR PROFIT
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.25; // ⚡️ ELITE SCALPER (Lowered from 0.40)
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.15; // ⚡️ ELITE SCALPER (Lowered for high velocity)
   const AUTOPILOT_MIN_ATR_PCT = 0.005; // ⚡️ even more aggressive
   const AUTOPILOT_MAX_CHOP_SCORE = 0.55; // Allow more volatile markets
   const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 2; // Tighten for higher capture
-  const AUTOPILOT_MIN_EDGE_BPS = 8; // Drop threshold to catch small moves
+  const AUTOPILOT_MIN_EDGE_BPS = 5; // Catch smaller moves
   const AUTOPILOT_MIN_EDGE_BUFFER_SHORT_BPS = 10; // ⚡️ AGGRESSIVE
   const AUTOPILOT_MIN_EDGE_BUFFER_LONG_BPS = 5; // ⚡️ AGGRESSIVE
-  const AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS = 8; // 🚀 FAST START (Lowered from 20)
+  const AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS = 3; // 🚀 ULTRA FAST START (Lowered from 8)
   const AUTOPILOT_MAX_DRAWDOWN_PCT_STOP = 0.65; // 🛡️ WIDER STOP FOR VOLATILITY
   const AUTOPILOT_TAKE_PROFIT_PCT = 1.05; // 🎯 TARGET (Raised from 0.75)
   const AUTOPILOT_REVERSAL_EXIT_THRESHOLD = 0.15; // 🛡️ SENSITIVE
