@@ -2232,9 +2232,9 @@ export default function MarketTerminal() {
           const maxSafeOrderVal = effectiveAllowedPower * 0.7;
 
           // Safety: refuse buys when available cash is critically low
-          if (side === "BUY" && cashValue < 500) {
-            addAutopilotLog(`Blocked live automated BUY: available cash $${cashValue.toFixed(2)} below safety minimum $500.`, "warn");
-            addLog(symbolClean, "AUTO_BUY_BLOCKED", `Available cash $${cashValue.toFixed(2)} below $500 safety minimum.`, "WARNING");
+          if (side === "BUY" && cashValue < 10) {
+            addAutopilotLog(`Blocked live automated BUY: available cash $${cashValue.toFixed(2)} below safety minimum $10.`, "warn");
+            addLog(symbolClean, "AUTO_BUY_BLOCKED", `Available cash $${cashValue.toFixed(2)} below $10 safety minimum.`, "WARNING");
             return {
               status: "BLOCKED",
               code: "BLOCKED_LOW_CASH",
@@ -2455,10 +2455,10 @@ export default function MarketTerminal() {
           // Safety: refuse buys when available cash is critically low
           try {
             const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-            if (side === "BUY" && cashValue < 500) {
+            if (side === "BUY" && cashValue < 10) {
               setIsPlacingOrder(false);
-              setOrderError(`Blocked: available cash $${cashValue.toFixed(2)} is below safety minimum $500.`);
-              addLog(normSymbol, "BUY_FAILED", `Blocked buy: available cash $${cashValue.toFixed(2)} < $500 safety minimum.`, "WARNING");
+              setOrderError(`Blocked: available cash $${cashValue.toFixed(2)} is below safety minimum $10.`);
+              addLog(normSymbol, "BUY_FAILED", `Blocked buy: available cash $${cashValue.toFixed(2)} < $10 safety minimum.`, "WARNING");
               return {
                 status: "BLOCKED",
                 code: "BLOCKED_LOW_CASH",
@@ -2466,7 +2466,7 @@ export default function MarketTerminal() {
                 side,
                 requestedQty: qtyNum,
                 executedQty: 0,
-                message: `Available cash $${cashValue.toFixed(2)} below safety minimum $500.`,
+                message: `Available cash $${cashValue.toFixed(2)} below safety minimum $10.`,
               };
             }
           } catch (e) {}
@@ -3572,27 +3572,35 @@ export default function MarketTerminal() {
       }
 
       else if (curRef.autopilotStrategy === "SCALPER") {
+        const existingScalperPos = currentActivePositions.find((p) => p.symbol === targetSymbol);
+        const isLiveMode = !!curRef.useAlpacaLive || !!curRef.isPaper;
+        const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
+        const rawEquity = parseFloat(curRef.alpacaAccount?.equity || "0");
+        
+        // --- Capacity / Cash Guard ---
+        // Pre-emptively skip symbols we don't own if we already know we have no money/margin.
+        // This prevents the bot from "trying" to trade and hitting redundant blocks/log-spam.
+        const currentMaint = parseFloat(curRef.alpacaAccount?.maintenance_margin || "0");
+        const capUsed = rawEquity > 0 ? (currentMaint / rawEquity) * 100 : 0;
+        const isLowCash = isLiveMode && rawCash < 10;
+        
+        if (!existingScalperPos && (capUsed > 85 || isLowCash)) {
+          // If we have no position and no capacity, skip the evaluation entirely.
+          continue;
+        }
+
         addAutopilotLog(`Triggering Micro-Scalper engine on target ticker: ${targetSymbol}...`, "info");
         
         const matched = currentActivePositions.find((p) => p.symbol === targetSymbol);
         const livePriceFromAccount = curRef.alpacaPositions?.find((p: any) => p.symbol === targetSymbol)?.current_price || 0;
         let currentSpotPrice = matched?.current_price || livePriceFromAccount || 150.0;
 
-        const existingScalperPos = currentActivePositions.find((p) => p.symbol === targetSymbol);
         const hasPendingSeedBuy = autopilotPendingBuySymbolsRef.current.has(targetSymbol);
 
-        const isLiveMode = !!curRef.useAlpacaLive || !!curRef.isPaper;
-        const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
-        const rawEquity = parseFloat(curRef.alpacaAccount?.equity || "0");
-
         // --- Margin Guard ---
-        // Block new entries if maintenance margin exceeds 85% of equity to prevent 401/Margin-Call rejections or forced liquidation loops.
-        const currentMaint = parseFloat(curRef.alpacaAccount?.maintenance_margin || "0");
-        const capUsed = rawEquity > 0 ? (currentMaint / rawEquity) * 100 : 0;
+        // Secondary guard: even if we own it, we might skip new ADDITIONS to the position if utilization is maxed.
         if (capUsed > 85) {
           addAutopilotLog(`Margin Guard Active: Skipping entry evaluation for ${targetSymbol}. Account utilization at ${capUsed.toFixed(1)}% (Limit: 85%).`, "warn");
-          // continue instead of break to allow exit logic for existing positions further in the list.
-          // Note: Entry logic is below this block, exit logic is further down.
         }
 
         // Fixed: Scalper budget was using Buying Power, leading to extreme unintentional leverage (e.g. 10% of BP on a 4x margin account = 40% of equity per symbol).
