@@ -87,3 +87,6 @@ verify_env.py
 .env.production
 .env.staging
 .env.development
+
+# Catch-all for OPERATIONAL directory
+OPERATIONAL/*
