@@ -116,7 +116,6 @@ export async function POST(req: Request) {
           );
         }
       }
-      }
       payload.qty = finalQty.toString();
 
       if (parseFloat(payload.qty) <= 0) {

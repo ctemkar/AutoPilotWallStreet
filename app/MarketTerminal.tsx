@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import SafeStateManager from "../lib/safeState";
 import { ResponsiveContainer, AreaChart, Area, YAxis } from "recharts";
-import { quickTickers } from "./tickerList";
+import { ELITE_TICKER_UNIVERSE as quickTickers } from "./tickerList";
 import {
   RefreshCw,
   Trash2,
@@ -846,7 +846,7 @@ export default function MarketTerminal() {
   useEffect(() => {
     try {
       const strategyStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotStrategy");
-      const targetStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotTargetTicker");
+      const targetStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotTargetTicker_v2");
       const autoStartStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotAutoStart");
       const warnStored = typeof window !== "undefined" && localStorage.getItem("sentry:warnThreshold");
       const criticalStored = typeof window !== "undefined" && localStorage.getItem("sentry:criticalThreshold");
@@ -856,7 +856,7 @@ export default function MarketTerminal() {
       const maxExposureStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxExposurePct");
       const minLiveQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinQty");
       const maxConcurrentStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxConcurrent");
-      const broadScan = typeof window !== "undefined" && localStorage.getItem("sentry:scanBroadUniverse");
+      const broadScan = typeof window !== "undefined" && localStorage.getItem("sentry:scanBroadUniverse_v2");
       const blockedMarketsStored = typeof window !== "undefined" && localStorage.getItem("sentry:blockedMarkets");
       const lossGuardStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotLossGuard");
       const tradeFormTabStored = typeof window !== "undefined" && localStorage.getItem("sentry:tradeFormTab");
@@ -990,7 +990,7 @@ export default function MarketTerminal() {
     try {
       if (typeof window !== "undefined") {
         localStorage.setItem("sentry:autopilotStrategy", String(autopilotStrategy));
-        localStorage.setItem("sentry:autopilotTargetTicker", String(autopilotTargetTicker));
+        localStorage.setItem("sentry:autopilotTargetTicker_v2", String(autopilotTargetTicker));
         localStorage.setItem("sentry:autopilotAutoStart", String(autopilotAutoStart));
         localStorage.setItem("sentry:warnThreshold", String(warnThreshold));
         localStorage.setItem("sentry:criticalThreshold", String(criticalThreshold));
@@ -1004,7 +1004,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:autoLiquidateBeforeClose", String(autoLiquidateBeforeClose));
         localStorage.setItem("sentry:liquidationBeforeCloseMin", String(liquidationBeforeCloseMin));
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
-        localStorage.setItem("sentry:scanBroadUniverse", String(autopilotScanBroadUniverse));
+        localStorage.setItem("sentry:scanBroadUniverse_v2", String(autopilotScanBroadUniverse));
         localStorage.setItem("sentry:autopilotAutoSwitchEnabled", String(autopilotAutoSwitchEnabled));
         localStorage.setItem("sentry:blockedMarkets", JSON.stringify(blockedMarkets));
         localStorage.setItem("sentry:allowLiveShorts", String(allowLiveShorts));

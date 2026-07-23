@@ -1,4 +1,4 @@
-export const quickTickers = [
+export const ELITE_TICKER_UNIVERSE = [
   "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "NFLX", "AMD", "INTC",
   "PYPL", "ADBE", "CSCO", "PEP", "AVGO", "COST", "CMCSA", "TMUS", "TXN", "QCOM",
   "HON", "AMAT", "SBUX", "AMGN", "ADI", "ADP", "ISRG", "MDLZ", "GILD", "BKNG",
