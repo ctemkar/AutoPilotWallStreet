@@ -757,13 +757,13 @@ export default function MarketTerminal() {
   const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
-  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(3.0); // Tighter for high-velocity scalping
-  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(1.8); // Managed risk
+  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(0.8); // High-velocity scalping
+  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(1.5); // Tighter risk
 
   // Risk screening & diversification controls
-  const [minAvgVolume, setMinAvgVolume] = useState<number>(100000); // reduced volume filter for more targets
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(15); // increased per symbol
-  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(35000); // 🚀 ELITE
+  const [minAvgVolume, setMinAvgVolume] = useState<number>(500000); // Higher liquidity floor
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(8); // Reduced concentration
+  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(20000); // restricted ELITE cap
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(255); // 🚀 ELITE
   
   // 🚀 ELITE: Hard override to ensure 255 positions even if storage is hijacked
@@ -5867,7 +5867,14 @@ export default function MarketTerminal() {
           throw new Error(rawData?.error || "Portfolio liquidation rejected by Alpaca.");
         }
         
-        addLog("PORTFOLIO", "LIQUIDATION_COMPLETE", "Alpaca direct portfolio liquidation broadcasted. All broker assets closed out.", "SUCCESS");
+        const isMarketClosed = marketSession === "CLOSED";
+        const successMessage = isMarketClosed 
+          ? "Alpaca mass-liquidation received. Positions are now PENDING CLOSURE because the market is currently CLOSED. They will be resolved at market open."
+          : "Alpaca direct portfolio liquidation broadcasted. All broker assets closed out.";
+
+        addLog("PORTFOLIO", "LIQUIDATION_COMPLETE", successMessage, "SUCCESS");
+        showToast(successMessage, "SUCCESS");
+
         for (const pos of alpacaPositions) {
           if (Math.abs(pos.qty) > 0 && isLossMakingPosition(pos)) {
             armLiquidationCooldown(pos.symbol, "portfolio liquidation");
@@ -5875,7 +5882,7 @@ export default function MarketTerminal() {
         }
         
         setTimeout(() => {
-          handleRefreshData();
+          handleRefreshData({ silent: true });
         }, 1500);
       } else {
         // Local simulator portfolio liquidation
@@ -7234,12 +7241,24 @@ if __name__ == "__main__":
             <table className="w-full text-left border-collapse" id="positions-table">
               <thead>
                 <tr className="border-b border-brand-border/70 text-gray-400 text-xs font-semibold tracking-wider font-mono">
-                  <th className="py-3 px-3 uppercase">Asset Ticker</th>
-                  <th className="py-3 px-3 text-right uppercase">Position Shares</th>
-                  <th className="py-3 px-3 text-right uppercase">Market Value</th>
-                  <th className="py-3 px-3 text-right uppercase">Risk Beta</th>
-                  <th className="py-3 px-3 text-right uppercase">Margin Maint%</th>
-                  <th className="py-3 px-3 text-right uppercase">Unrealized P/L</th>
+                  <th onClick={() => handleSort('SYMBOL')} className="py-3 px-3 uppercase cursor-pointer hover:text-white transition-colors select-none">
+                    Asset Ticker {sortColumn === 'SYMBOL' && (sortDirection === 'ASC' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('QTY')} className="py-3 px-3 text-right uppercase cursor-pointer hover:text-white transition-colors select-none">
+                    Position Shares {sortColumn === 'QTY' && (sortDirection === 'ASC' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('VALUE')} className="py-3 px-3 text-right uppercase cursor-pointer hover:text-white transition-colors select-none">
+                    Market Value {sortColumn === 'VALUE' && (sortDirection === 'ASC' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('BETA')} className="py-3 px-3 text-right uppercase cursor-pointer hover:text-white transition-colors select-none">
+                    Risk Beta {sortColumn === 'BETA' && (sortDirection === 'ASC' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('MAINTENANCE')} className="py-3 px-3 text-right uppercase cursor-pointer hover:text-white transition-colors select-none">
+                    Margin Maint% {sortColumn === 'MAINTENANCE' && (sortDirection === 'ASC' ? '↑' : '↓')}
+                  </th>
+                  <th onClick={() => handleSort('PL')} className="py-3 px-3 text-right uppercase cursor-pointer hover:text-white transition-colors select-none">
+                    Unrealized P/L {sortColumn === 'PL' && (sortDirection === 'ASC' ? '↑' : '↓')}
+                  </th>
                   <th className="py-3 px-3 text-center uppercase">Last 24h Trend</th>
                   <th className="py-3 px-3 text-center uppercase">Action</th>
                 </tr>
@@ -7252,8 +7271,41 @@ if __name__ == "__main__":
                     return (p.qty || 0) < 0;
                   });
 
-                  return filteredPositions.length > 0 ? (
-                    filteredPositions.map((pos) => {
+                  // Sorting and filtering positions
+                  const sortedPositions = [...filteredPositions].sort((a, b) => {
+                    if (sortColumn === 'SYMBOL') {
+                      return sortDirection === 'ASC' 
+                        ? (a.symbol || '').localeCompare(b.symbol || '') 
+                        : (b.symbol || '').localeCompare(a.symbol || '');
+                    }
+                    if (sortColumn === 'QTY') {
+                      return sortDirection === 'ASC' ? a.qty - b.qty : b.qty - a.qty;
+                    }
+                    if (sortColumn === 'VALUE') {
+                      const valA = (a.market_value !== undefined ? a.market_value : (a.current_price * a.qty)) || 0;
+                      const valB = (b.market_value !== undefined ? b.market_value : (b.current_price * b.qty)) || 0;
+                      return sortDirection === 'ASC' ? valA - valB : valB - valA;
+                    }
+                    if (sortColumn === 'BETA') {
+                      const betaA = a.symbol === "BTCUSD" ? 2.4 : (a.symbol === "NVDA" ? 1.9 : 1.0);
+                      const betaB = b.symbol === "BTCUSD" ? 2.4 : (b.symbol === "NVDA" ? 1.9 : 1.0);
+                      return sortDirection === 'ASC' ? betaA - betaB : betaB - betaA;
+                    }
+                    if (sortColumn === 'MAINTENANCE') {
+                      const mA = a.maintenance_margin_rate ?? 0;
+                      const mB = b.maintenance_margin_rate ?? 0;
+                      return sortDirection === 'ASC' ? mA - mB : mB - mA;
+                    }
+                    if (sortColumn === 'PL') {
+                      const plA = a.unrealized_pl !== undefined ? a.unrealized_pl : (a.current_price - a.avg_entry_price) * a.qty;
+                      const plB = b.unrealized_pl !== undefined ? b.unrealized_pl : (b.current_price - b.avg_entry_price) * b.qty;
+                      return sortDirection === 'ASC' ? plA - plB : plB - plA;
+                    }
+                    return 0;
+                  });
+
+                  return sortedPositions.length > 0 ? (
+                    sortedPositions.map((pos) => {
                     const plVal = pos.unrealized_pl !== undefined ? pos.unrealized_pl : (pos.current_price - pos.avg_entry_price) * pos.qty;
                     const isPlPositive = plVal >= 0;
 
@@ -7267,8 +7319,15 @@ if __name__ == "__main__":
                     return (
                       <tr key={pos.symbol} className="hover:bg-brand-card/45 transition">
                         <td className="py-3.5 px-3">
-                          <div className="font-bold text-white text-base" id={`ticker-${pos.symbol}`}>
-                            {pos.symbol}
+                          <div className="flex items-center gap-2">
+                            <div className="font-bold text-white text-base" id={`ticker-${pos.symbol}`}>
+                              {pos.symbol}
+                            </div>
+                            {marketSession === 'CLOSED' && (
+                              <span className="text-[10px] bg-brand-yellow/10 text-brand-yellow border border-brand-yellow/20 px-1.5 py-0.5 rounded leading-none font-bold animate-pulse">
+                                PENDING OPEN
+                              </span>
+                            )}
                           </div>
                           <div className="text-[10px] text-gray-500 max-w-[100px] truncate" id={`ticker-subtext-${pos.symbol}`}>
                             Entry: ${pos.avg_entry_price.toFixed(2)}
