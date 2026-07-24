@@ -7616,17 +7616,16 @@ if __name__ == "__main__":
                   )}
                   
                   {/* START FRESH BUTTON (DANGER) */}
-                  {!isAutopilotActive && (
-                    <button
-                      type="button"
-                      id="start-fresh-btn"
-                      onClick={handleStartFresh}
-                      className="w-full mt-2 py-2 border border-brand-red/40 hover:bg-brand-red/10 text-brand-red font-bold text-[10px] uppercase tracking-wider rounded-lg transition duration-150 flex items-center justify-center gap-2 font-mono"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                      PURGE ALL & START AGAIN
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    id="start-fresh-btn"
+                    onClick={handleStartFresh}
+                    disabled={isAutopilotActive}
+                    className="w-full mt-2 py-2 border border-brand-red/40 hover:bg-brand-red/10 text-brand-red font-bold text-[10px] uppercase tracking-wider rounded-lg transition duration-150 flex items-center justify-center gap-2 font-mono disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    PURGE ALL & START AGAIN
+                  </button>
 
                   <p className="text-[10px] text-gray-500 font-mono mt-1.5 text-center">
                     {isAutopilotActive 
