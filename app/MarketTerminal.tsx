@@ -4660,12 +4660,12 @@ export default function MarketTerminal() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(getBrokerAuthPayload({ isPaper: stateRef.current.isPaper })),
       });
-      if (liqRes.ok) {
+      const data = await liqRes.json();
+      if (liqRes.ok && !data.error) {
         addAutopilotLog("✅ ALL POSITIONS LIQUIDATED. Account cleared successfully.", "success");
         forceResumeAutopilot();
       } else {
-        const err = await liqRes.json();
-        addAutopilotLog(`❌ Liquidation failed: ${err?.error || "Unknown error"}. Clean up manually?`, "warn");
+        addAutopilotLog(`❌ Liquidation failed: ${data?.error || "Unknown error"}. Clean up manually?`, "warn");
       }
     } catch (e) {
       addAutopilotLog("❌ System error during reset.", "warn");
