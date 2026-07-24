@@ -1864,17 +1864,30 @@ export default function MarketTerminal() {
     // Market-block enforcement
     try {
       const marketSessionNow = getMarketSessionET();
-      if (marketSessionNow === "CLOSED") {
-        addAutopilotLog(`Blocked ${side} ${symbolClean}: market session is CLOSED (ET).`, "warn");
-        return {
-          status: "BLOCKED",
-          code: "BLOCKED_MARKET_CLOSED",
-          symbol: symbolClean,
-          side,
-          requestedQty: qtyNum,
-          executedQty: 0,
-          message: "Market is closed. Non-crypto orders are blocked until pre-market."
-        };
+      const isCrypto = isCryptoSymbol(symbolClean);
+      const activePositionsForCloseCheck = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
+      const existingPos = activePositionsForCloseCheck.find((p: any) => p.symbol === symbolClean);
+      const isExit = !!existingPos && (
+        (existingPos.qty > 0 && side === "SELL") ||
+        (existingPos.qty < 0 && side === "BUY")
+      );
+
+      if (marketSessionNow === "CLOSED" && !isCrypto) {
+        // Block new entries when market is closed for non-crypto
+        if (!isExit) {
+          addAutopilotLog(`Blocked ${side} ${symbolClean}: market session is CLOSED (ET).`, "warn");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_MARKET_CLOSED",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: "Market is closed. Non-crypto entries are blocked until pre-market."
+          };
+        } else {
+          addAutopilotLog(`Market is CLOSED, but allowing EXIT order for ${symbolClean}. Note: it may be queued until pre-market open.`, "info");
+        }
       }
     } catch (e) { /* ignore */ }
 
@@ -3440,7 +3453,9 @@ export default function MarketTerminal() {
       setAutopilotScanTotalTargets(scanTargets.length);
 
       const marketSessionNow = getMarketSessionET();
-      if (marketSessionNow === "CLOSED") {
+      const hasActivePositions = currentActivePositions.length > 0;
+
+      if (marketSessionNow === "CLOSED" && !hasActivePositions) {
         setAutopilotScanTotalTargets(0);
         setAutopilotScanProcessedCount(0);
         setAutopilotCurrentScanTarget(null);
@@ -3448,6 +3463,10 @@ export default function MarketTerminal() {
         setAutopilotScanErrorCount(0);
         addAutopilotLog("Autopilot scan skipped: market session is CLOSED. Wall Street equities trade only during market hours.", "info");
         return;
+      }
+
+      if (marketSessionNow === "CLOSED" && hasActivePositions) {
+        addAutopilotLog("Market is CLOSED, but processing scan for existing positions (exits only).", "warn");
       }
 
       if (scanTargets.length === 0) {
