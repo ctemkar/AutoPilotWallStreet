@@ -6100,7 +6100,14 @@ if __name__ == "__main__":
     .length;
   const nextScanIn = autopilotNextScanInSec ?? autopilotInterval;
   const connectionStatus = isConnected ? "Alpaca Connected" : "Alpaca Disconnected";
-  const alpacaAuthText = isConnected ? "OK" : "N/A";
+  const isAlpacaInReadyState = isConnected && (
+    !alpacaAccount?.status || 
+    ['ACTIVE', 'PAPER_ONLY', 'APPROVED'].includes(alpacaAccount.status)
+  );
+  
+  const alpacaAuthText = isConnected 
+    ? (isAlpacaInReadyState ? "OK" : alpacaAccount?.status || "CONNECTED") 
+    : "N/A";
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 bg-brand-bg md:p-8" id="root-container">
@@ -7238,6 +7245,15 @@ if __name__ == "__main__":
             <div className="text-xs text-gray-400">Showing: {positionsView}</div>
           </div>
           <div className="overflow-x-auto" id="positions-table-overflow">
+            {alpacaAccount?.status === 'ACCOUNT_CLOSED_PENDING' && (
+              <div className="bg-red-900/40 border-l-4 border-red-500 p-4 mb-4 flex items-center gap-3">
+                <AlertTriangle className="text-red-500 w-6 h-6 flex-shrink-0" />
+                <div>
+                  <h3 className="text-red-200 font-bold uppercase tracking-wider text-sm">Account Deletion in Progress</h3>
+                  <p className="text-red-300/80 text-xs">Alpaca has moved this account to <strong>CLOSED_PENDING</strong>. Trading is disabled and these positions are in the process of being purged from the backend. They will disappear once the deletion is finalized.</p>
+                </div>
+              </div>
+            )}
             <table className="w-full text-left border-collapse" id="positions-table">
               <thead>
                 <tr className="border-b border-brand-border/70 text-gray-400 text-xs font-semibold tracking-wider font-mono">
