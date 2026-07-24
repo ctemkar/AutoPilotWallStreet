@@ -165,7 +165,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       account: {
-        // Expose last_equity so front-end can compute day change (Live Day P&L)
+        status: accountData.status,
         last_equity: safeNumber(accountData.last_equity),
         account_number: accountData.account_number,
         cash: safeNumber(accountData.cash),
