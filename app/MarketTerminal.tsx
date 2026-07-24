@@ -7245,12 +7245,12 @@ if __name__ == "__main__":
             <div className="text-xs text-gray-400">Showing: {positionsView}</div>
           </div>
           <div className="overflow-x-auto" id="positions-table-overflow">
-            {alpacaAccount?.status === 'ACCOUNT_CLOSED_PENDING' && (
+            {['ACCOUNT_CLOSED_PENDING', 'ACCOUNT_CLOSED'].includes(alpacaAccount?.status || '') && (
               <div className="bg-red-900/40 border-l-4 border-red-500 p-4 mb-4 flex items-center gap-3">
                 <AlertTriangle className="text-red-500 w-6 h-6 flex-shrink-0" />
                 <div>
-                  <h3 className="text-red-200 font-bold uppercase tracking-wider text-sm">Account Deletion in Progress</h3>
-                  <p className="text-red-300/80 text-xs">Alpaca has moved this account to <strong>CLOSED_PENDING</strong>. Trading is disabled and these positions are in the process of being purged from the backend. They will disappear once the deletion is finalized.</p>
+                  <h3 className="text-red-200 font-bold uppercase tracking-wider text-sm">Account Closed</h3>
+                  <p className="text-red-300/80 text-xs">Alpaca has marked this account as <strong>{alpacaAccount?.status}</strong>. Trading is disabled and these positions are in the process of being purged from the backend. They will disappear once the deletion is finalized and the account is reset.</p>
                 </div>
               </div>
             )}
