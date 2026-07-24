@@ -17,12 +17,20 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { isPaper, symbol, qty } = body;
-    // STRICT CREDENTIAL SEGREGATION: Never allow fallback between Live and Paper.
-    const apiKey = (isPaper
+
+    // resolve credentials from body or env
+    let providedKey = body?.apiKey || "";
+    let providedSecret = body?.apiSecret || "";
+    const looksLikeLive = providedKey.startsWith("AK");
+    const looksLikePaper = providedKey.startsWith("PK");
+    if (isPaper && looksLikeLive) { providedKey = ""; providedSecret = ""; }
+    else if (!isPaper && looksLikePaper) { providedKey = ""; providedSecret = ""; }
+
+    const apiKey = providedKey || (isPaper
       ? process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_PAPER_KEY
       : process.env.ALPACA_LIVE_API_KEY || process.env.ALPACA_API_KEY || process.env.ALPACA_KEY) || "";
 
-    const apiSecret = (isPaper
+    const apiSecret = providedSecret || (isPaper
       ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET
       : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET) || "";
 
@@ -49,7 +57,7 @@ export async function POST(req: Request) {
 
     let closeUrl = isSingleClose
       ? `${baseUrl}/v2/positions/${encodeURIComponent(symbolClean)}`
-      : `${baseUrl}/v2/positions`;
+      : `${baseUrl}/v2/positions?cancel_orders=true`;
 
     if (isSingleClose && qty) {
       const q = parseFloat(String(qty));

@@ -3582,10 +3582,15 @@ export default function MarketTerminal() {
         // This prevents the bot from "trying" to trade and hitting redundant blocks/log-spam.
         const currentMaint = parseFloat(curRef.alpacaAccount?.maintenance_margin || "0");
         const capUsed = rawEquity > 0 ? (currentMaint / rawEquity) * 100 : 0;
-        const isLowCash = isLiveMode && rawCash < 10;
+        
+        // Use a more conservative low-cash threshold to prevent "scraping the bottom" 
+        // which often leads to rejected fractional orders or high log noise.
+        const lowCashThreshold = Number(curRef.liveMinOrderQty) > 0 ? 500 : 100;
+        const isLowCash = isLiveMode && rawCash < lowCashThreshold;
         
         if (!existingScalperPos && (capUsed > 85 || isLowCash)) {
           // If we have no position and no capacity, skip the evaluation entirely.
+          // We only do this for new entries. Exits for held positions MUST still process.
           continue;
         }
 
@@ -3605,10 +3610,21 @@ export default function MarketTerminal() {
 
         // Fixed: Scalper budget was using Buying Power, leading to extreme unintentional leverage (e.g. 10% of BP on a 4x margin account = 40% of equity per symbol).
         // Switching to use Equity as the base to ensure the 10% cap is absolute relative to net liquidation value.
+        // Capped by actual available Buying Power to prevent doomed trades and broker rejections.
         const exposureLimit = Math.max(1, Math.min(95, Number(curRef.maxExposurePercentPerSymbol) || 15)) / 100;
+        const theoreticalBudget = (rawEquity > 0 ? rawEquity : rawCash) * exposureLimit;
+        const actualBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
+        
         const liveBudget = isLiveMode
-          ? Math.max(0, (rawEquity > 0 ? rawEquity : rawCash) * exposureLimit)
+          ? Math.max(0, Math.min(theoreticalBudget, actualBuyingPower))
           : 0;
+
+        // If the scaled-down budget is too small to even meet a minimum lot (e.g. $10), we skip.
+        if (!existingScalperPos && isLiveMode && liveBudget < 20) {
+          addAutopilotLog(`Cap Exceeded: Intended budget for ${targetSymbol} is $${theoreticalBudget.toFixed(0)}, but available BP $${actualBuyingPower.toFixed(0)} is too low. Skipping.`, "warn");
+          continue;
+        }
+
         const liveMinQty = Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.0001);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
         const liveQtyByBudget = targetSymbol === "BTCUSD" || targetSymbol === "ETHUSD"
@@ -4790,9 +4806,9 @@ export default function MarketTerminal() {
     if (savedApiKey) setApiKey(savedApiKey);
     if (savedApiSecret) setApiSecret(savedApiSecret);
     
-    // Forced Paper Mode per user request for safety & stability
-    localStorage.setItem("APCA_IS_PAPER", "true");
-    setIsPaper(true);
+    if (savedIsPaper !== null) {
+      setIsPaper(savedIsPaper);
+    }
 
     // If we have saved keys that look like LIVE keys (prefix AK) but we are now in PAPER mode,
     // we clear them to ensure the server fallback to the correct .env.local paper keys occurs.
@@ -4806,8 +4822,7 @@ export default function MarketTerminal() {
     const ts = HYDRATION_SAFE_TIME_PLACEHOLDER;
 
     const initApp = async () => {
-      // Overriding to true as requested
-      let effectiveIsPaper = true;
+      let effectiveIsPaper = isPaper;
 
       try {
         const resp = await fetch("/api/alpaca/inspect");
@@ -5032,83 +5047,77 @@ export default function MarketTerminal() {
     marginRiskStatus = "WARNING";
   }
 
-  // Auto-liquidation: sell non-crypto positions a configurable minutes before market close
+  // -------------------------------------------------------------------------
+  // Auto-liquidation & Stop-Loss Engine
+  // ------------------------------------
   useEffect(() => {
     if (typeof window === 'undefined') return;
     let timer: any = null;
+
     const checkAndLiquidate = async () => {
       const curRef = stateRef.current;
-      if (!curRef.useAlpacaLive) return; // only run in live mode
-      if (!autoLiquidateBeforeClose) return;
-      // compute ET time
-      const et = getNewYorkDateParts();
-      const day = et.dayOfWeek;
-      if (day === 0 || day === 6) return; // weekend
-      const minsNow = et.hour * 60 + et.minute;
-      const marketCloseMins = 16 * 60; // 16:00 ET
-      const minsToClose = marketCloseMins - minsNow;
-      const todayKey = `${et.year}-${String(et.month).padStart(2, "0")}-${String(et.day).padStart(2, "0")}`;
-      if (minsToClose <= liquidationBeforeCloseMin && minsToClose >= 0) {
-        if (lastAutoLiquidationDayRef.current === todayKey) return; // already ran today
-        lastAutoLiquidationDayRef.current = todayKey;
-        // collect non-crypto open positions (BOTH long and short)
-        const activePositions = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
-        const toClose = (activePositions || []).filter((p: any) => {
-          try {
-            const qtyNum = parseFloat(p.qty || 0);
-            return Math.abs(qtyNum) > 0.00001 && !isCryptoSymbol(String(p.symbol || ''));
-          } catch (e) { return false; }
-        });
-        if ((toClose || []).length === 0) return;
-        addLog('SENTRY', 'AUTO_LIQUIDATE', `Auto-liquidation triggered: closing ${toClose.length} non-crypto positions ${liquidationBeforeCloseMin}m before market close.`, 'WARNING');
-        addAutopilotLog(`🚨 Auto-liquidation: closing ${toClose.length} non-crypto positions now to avoid overnight equity exposure.`, 'warn');
-        for (const pos of toClose) {
-          try {
-            const qtyRaw = parseFloat(pos.qty || 0);
-            const qty = Math.abs(qtyRaw);
-            const side = qtyRaw > 0 ? 'SELL' : 'BUY';
-            if (!qty || qty <= 0) continue;
-            // fire and forget; executeAutopilotOrder handles pending bookkeeping
-            executeAutopilotOrder(pos.symbol, side as any, qty).catch((err) => console.error('auto-liquidate failed', err));
-          } catch (e) {
-            console.error('auto-liquidate error', e);
-          }
-        }
+      if (!curRef.useAlpacaLive) return; 
 
-        // Per-position absolute-dollar stop: close any single position losing more than $10
-        try {
-          const absPerStockStop = 10; // dollars
-          const livePositions = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
-          for (const p of (livePositions || [])) {
-            try {
-              const qty = parseFloat(p.qty || 0);
-              if (!(qty > 0)) continue;
-              const entry = parseFloat(p.avg_entry_price || 0);
-              const curPrice = parseFloat(p.current_price || p.last_trade?.price || 0);
-              if (!entry || !curPrice) continue;
-              const unrealized = (curPrice - entry) * qty;
-              if (unrealized <= -absPerStockStop && !(autopilotLossGuardBlockedUntilRef.current[p.symbol] > Date.now())) {
-                addLog(p.symbol, 'AUTO_ABS_DOLLAR_SL', `Per-stock absolute $${absPerStockStop} stop breached (unrealized ${unrealized.toFixed(2)}). Attempting forced SELL.`, 'WARNING');
-                addAutopilotLog(`🛑 Per-stock $${absPerStockStop} stop-loss: ${p.symbol} unrealized ${unrealized.toFixed(2)}. Forcing exit.`, 'warn');
-                // attempt forced sell
+      const currentSession = getMarketSessionET();
+      if (currentSession === "CLOSED") return; 
+
+      // 1. Market Close Liquidation
+      if (autoLiquidateBeforeClose) {
+        const et = getNewYorkDateParts();
+        const day = et.dayOfWeek;
+        if (day !== 0 && day !== 6) {
+          const minsNow = et.hour * 60 + et.minute;
+          const marketCloseMins = 16 * 60;
+          const minsToClose = marketCloseMins - minsNow;
+          const todayKey = `${et.year}-${String(et.month).padStart(2, "0")}-${String(et.day).padStart(2, "0")}`;
+
+          if (minsToClose <= liquidationBeforeCloseMin && minsToClose >= 0) {
+            if (lastAutoLiquidationDayRef.current !== todayKey) {
+              lastAutoLiquidationDayRef.current = todayKey;
+              const activePositions = curRef.alpacaPositions || [];
+              const toClose = activePositions.filter((p: any) => {
                 try {
-                  await executeAutopilotOrder(p.symbol, 'SELL', qty);
-                  // arm cooldown
-                  autopilotLossGuardBlockedUntilRef.current[p.symbol] = Date.now() + LIQUIDATION_COOLDOWN_MS;
-                } catch (e) {
-                  console.error('auto forced sell failed', e);
+                  const qtyNum = parseFloat(p.qty || 0);
+                  return Math.abs(qtyNum) > 0.00001 && !isCryptoSymbol(String(p.symbol || ""));
+                } catch (e) { return false; }
+              });
+
+              if (toClose.length > 0) {
+                addLog("SENTRY", "AUTO_LIQUIDATE", `Closing ${toClose.length} positions before close.`, "WARNING");
+                for (const pos of toClose) {
+                  const qtyRaw = parseFloat(pos.qty || 0);
+                  const qty = Math.abs(qtyRaw);
+                  const side = qtyRaw > 0 ? "SELL" : "BUY";
+                  executeAutopilotOrder(pos.symbol, side as any, qty).catch(() => {});
                 }
               }
-            } catch (e) {
-              // ignore per-position errors
             }
           }
-        } catch (e) {
-          // swallow
         }
       }
+
+      // 2. Absolute Dollar Stop Loss ($10)
+      try {
+        const absPerStockStop = 10;
+        const livePositions = curRef.alpacaPositions || [];
+        for (const p of livePositions) {
+          try {
+            const qty = parseFloat(p.qty || 0);
+            if (!(qty > 0)) continue;
+            const entry = parseFloat(p.avg_entry_price || 0);
+            const curPrice = parseFloat(p.current_price || p.last_trade?.price || 0);
+            if (!entry || !curPrice) continue;
+            const unrealized = (curPrice - entry) * qty;
+            if (unrealized <= -absPerStockStop && !(autopilotLossGuardBlockedUntilRef.current[p.symbol] > Date.now())) {
+              addLog(p.symbol, "AUTO_STOP", `Stop loss $${absPerStockStop} trip.`, "WARNING");
+              await executeAutopilotOrder(p.symbol, "SELL", qty);
+              autopilotLossGuardBlockedUntilRef.current[p.symbol] = Date.now() + LIQUIDATION_COOLDOWN_MS;
+            }
+          } catch (e) {}
+        }
+      } catch (e) {}
     };
-    // run immediately and then every 30s
+
     checkAndLiquidate();
     timer = setInterval(checkAndLiquidate, 30000);
     return () => { if (timer) clearInterval(timer); };
@@ -6451,25 +6460,30 @@ if __name__ == "__main__":
             </p>
 
             <div className="space-y-3" id="api-inputs-form">
-              <div className="p-3 bg-brand-bg/40 rounded-lg border border-brand-border/60">
-                <p className="text-xs text-brand-green font-mono font-bold uppercase mb-1">
-                  STRICT PAPER MODE ACTIVE
-                </p>
-                <p className="text-xs text-gray-300 font-mono">
-                  Environment is forced to Paper Trading for safety. Real capital is NOT at risk.
-                </p>
-                <p className="text-[10px] text-gray-500 mt-2">To change credentials, update <span className="font-mono">.env.local</span> and restart the dev server.</p>
-              </div>
-
-              <div id="alpaca-endpoint-toggles" className="flex items-center justify-between py-1 bg-brand-bg/50 px-2.5 rounded-lg border border-brand-border/60 grayscale pointer-events-none opacity-60">
+              <div id="alpaca-endpoint-toggles" className="flex items-center justify-between py-1 bg-brand-bg/50 px-2.5 rounded-lg border border-brand-border/60">
                 <span className="text-xs text-gray-400 font-medium">Remote API Endpoint</span>
                 <div className="flex gap-2" id="endpoints-group">
                   <button
                     id="paper-api-toggle"
-                    disabled
-                    className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition bg-brand-green/20 text-brand-green border border-brand-green/45`}
+                    onClick={() => setIsPaper(true)}
+                    className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition ${
+                      isPaper
+                        ? "bg-brand-green/20 text-brand-green border border-brand-green/45"
+                        : "text-gray-500 border border-transparent hover:text-gray-300"
+                    }`}
                   >
                     Paper
+                  </button>
+                  <button
+                    id="live-api-toggle"
+                    onClick={() => setIsPaper(false)}
+                    className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition ${
+                      !isPaper
+                        ? "bg-brand-green/20 text-brand-green border border-brand-green/45"
+                        : "text-gray-500 border border-transparent hover:text-gray-300"
+                    }`}
+                  >
+                    Live
                   </button>
                 </div>
               </div>
