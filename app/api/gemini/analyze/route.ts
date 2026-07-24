@@ -99,13 +99,13 @@ Keep the tone professional, deterministic, and direct. No conversational filler.
       try {
         const result = await genAI.models.generateContent({
           model: "gemini-1.5-flash",
-          contents: prompt,
-          generationConfig: {
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          config: {
             maxOutputTokens: 1000,
-            temperature: 0.2, // 🚀 ELITE: Lower temperature for more deterministic risk signals
+            temperature: 0.2,
           }
         });
-        responseText = result.text;
+        responseText = result.text || "";
         if (responseText) break;
       } catch (apiErr: any) {
         lastError = apiErr;

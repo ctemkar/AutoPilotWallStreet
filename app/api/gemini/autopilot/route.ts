@@ -71,32 +71,8 @@ export async function POST(req: Request) {
     }
 
     try {
-      // Initialize modern @google/genai client
-      const genAI = new GoogleGenAI(apiKey);
-      const model = genAI.getGenerativeModel({
-        model: "gemini-1.5-flash",
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              action: {
-                type: Type.STRING,
-                description: "Tactical action to execute. Options: BUY, SELL, HOLD",
-              },
-              qty: {
-                type: Type.NUMBER,
-                description: "Quantity of shares to trade, e.g., default between 1 and 15",
-              },
-              reason: {
-                type: Type.STRING,
-                description: "Strategic reason text for executing this trade.",
-              },
-            },
-            required: ["action", "qty", "reason"],
-          },
-        },
-      });
+      // Use modern @google/genai client
+      const genAI = new GoogleGenAI({ apiKey });
 
       const activePositionsStr = Array.isArray(positions) && positions.length > 0
         ? positions.map((p: any) => `- **${p.symbol}**: Qty ${p.qty} | Current Price ${currencySign}${p.current_price} | Entry Price ${currencySign}${p.avg_entry_price}`).join("\n")
@@ -132,9 +108,32 @@ Make your decision tactical and realistic.`;
 
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const result = await model.generateContent(prompt);
-          const response = await result.response;
-          responseText = response.text();
+          const result = await genAI.models.generateContent({
+            model: "gemini-1.5-flash",
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  action: {
+                    type: Type.STRING,
+                    description: "Tactical action to execute. Options: BUY, SELL, HOLD",
+                  },
+                  qty: {
+                    type: Type.NUMBER,
+                    description: "Quantity of shares to trade, e.g., default between 1 and 15",
+                  },
+                  reason: {
+                    type: Type.STRING,
+                    description: "Strategic reason text for executing this trade.",
+                  },
+                },
+                required: ["action", "qty", "reason"],
+              },
+            },
+          });
+          responseText = result.text || "";
           if (responseText) break;
         } catch (apiErr: any) {
           lastError = apiErr;
