@@ -38,7 +38,7 @@ function isExtendedUsSession(etNow: Date): boolean {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { isPaper, symbol, qty, side, notional, estimatedPrice } = body;
+    const { isPaper, symbol, qty, side, notional, estimatedPrice, takeProfit, stopLoss } = body;
 
     // resolve credentials from body or env
     let providedKey = body?.apiKey || "";
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
       ? process.env.ALPACA_PAPER_API_SECRET || process.env.ALPACA_PAPER_SECRET
       : process.env.ALPACA_LIVE_API_SECRET || process.env.ALPACA_API_SECRET || process.env.ALPACA_SECRET) || "";
 
-    console.log(`[ALPACA_TRADE] symbol=${symbol} side=${side} isPaper=${isPaper} apiKey=${apiKey?.slice(0, 4)}...`);
+    console.log(`[ALPACA_TRADE] symbol=${symbol} side=${side} isPaper=${isPaper} apiKey=${apiKey?.slice(0, 4)}... tp=${takeProfit} sl=${stopLoss}`);
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
@@ -97,6 +97,21 @@ export async function POST(req: Request) {
       type: "market",
       time_in_force: "day",
     };
+
+    // Support bracket orders for automated TP/SL logic
+    if (takeProfit || stopLoss) {
+      payload.order_class = "bracket";
+      if (takeProfit) {
+        payload.take_profit = {
+          limit_price: parseFloat(takeProfit).toFixed(2),
+        };
+      }
+      if (stopLoss) {
+        payload.stop_loss = {
+          stop_price: parseFloat(stopLoss).toFixed(2),
+        };
+      }
+    }
 
     if (hasNotional) {
       payload.notional = notional.toString();

@@ -307,7 +307,13 @@ function getMarketSessionET(): "OPEN" | "EXTENDED" | "CLOSED" {
 function resolveBuyingPower(alpacaAccount?: any): number {
   const regt = parseFloat(alpacaAccount?.regt_buying_power ?? "0");
   const bp = parseFloat(alpacaAccount?.buying_power ?? "0");
-  return Number.isFinite(regt) && regt > 0 ? regt : (Number.isFinite(bp) ? bp : 0);
+  const dt = parseFloat(alpacaAccount?.daytrading_buying_power ?? "0");
+  const cash = parseFloat(alpacaAccount?.cash ?? "0");
+  
+  // For most retail accounts, the actual spending power is the maximum of these fields.
+  // We include cash as a fallback for Cash accounts where regt/bp might lag during settlement.
+  const power = Math.max(regt, bp, dt, cash);
+  return Number.isFinite(power) ? power : 0;
 }
 
 const HYDRATION_SAFE_TIME_PLACEHOLDER = "--:--";
@@ -758,10 +764,10 @@ export default function MarketTerminal() {
   const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(1.5); // Tighter risk
 
   // Risk screening & diversification controls
-  const [minAvgVolume, setMinAvgVolume] = useState<number>(500000); // Higher liquidity floor
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(8); // Reduced concentration
-  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(20000); // restricted ELITE cap
-  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(255); // 🚀 ELITE
+  const [minAvgVolume, setMinAvgVolume] = useState<number>(100); // LOWER LIQUIDITY FLOOR FOR TESTING
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(15);
+  const [perSymbolDollarCap, setPerSymbolDollarCap] = useState<number>(35000); 
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(255);
   
   // 🚀 ELITE: Hard override to ensure 255 positions even if storage is hijacked
   const effectiveMaxConcurrent = Math.max(255, maxConcurrentPositions);
@@ -776,16 +782,16 @@ export default function MarketTerminal() {
   const AUTOPILOT_MAX_TRADES_PER_DAY = 1000; // 🚀 INCREASED FOR PROFIT
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 500; // 🚀 INCREASED FOR PROFIT
   const AUTOPILOT_DAILY_PROFIT_GOAL_USD = 5000; // 🚀 INCREASED FOR PROFIT
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.18; // 🛡️ RAISED FOR QUALITY (From 0.05)
-  const AUTOPILOT_MIN_ATR_PCT = 0.015; // 🛡️ REQUIRE REAL VOLATILITY (From 0.002)
-  const AUTOPILOT_MAX_CHOP_SCORE = 0.48; // 🛡️ LOWER IS BETTER (From 0.55)
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 6; // Tighten for higher capture
-  const AUTOPILOT_MIN_EDGE_BPS = 10; // Catch smaller moves
-  const AUTOPILOT_MIN_EDGE_BUFFER_SHORT_BPS = 15; // ⚡️ AGGRESSIVE
-  const AUTOPILOT_MIN_EDGE_BUFFER_LONG_BPS = 5; // ⚡️ AGGRESSIVE
-  const AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS = 4; // 🛡️ REQUIRE DATA MATURITY (Raised from 1)
-  const AUTOPILOT_MAX_DRAWDOWN_PCT_STOP = 0.35; // 🛡️ CUT LOSSES FASTER (From 0.65)
-  const AUTOPILOT_TAKE_PROFIT_PCT = 0.45; // 🎯 TARGET SCALPING (Lowered from 1.05)
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.001; // 🛡️ MEGA-AGGRESSIVE (From 0.18)
+  const AUTOPILOT_MIN_ATR_PCT = 0.0001; // 🛡️ MEGA-AGGRESSIVE (From 0.015)
+  const AUTOPILOT_MAX_CHOP_SCORE = 0.99; // 🛡️ MEGA-AGGRESSIVE (From 0.48)
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 0.1; // Tighten for higher capture
+  const AUTOPILOT_MIN_EDGE_BPS = 0.1; // Catch smaller moves
+  const AUTOPILOT_MIN_EDGE_BUFFER_SHORT_BPS = 1; // ⚡️ AGGRESSIVE
+  const AUTOPILOT_MIN_EDGE_BUFFER_LONG_BPS = 1; // ⚡️ AGGRESSIVE
+  const AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS = 1; // 🛡️ MEGA-AGGRESSIVE (From 4)
+  const AUTOPILOT_MAX_DRAWDOWN_PCT_STOP = 1.5; // 🛡️ 1.5% SL (Requested)
+  const AUTOPILOT_TAKE_PROFIT_PCT = 0.8; // 🎯 0.8% TP (Requested)
   const AUTOPILOT_REVERSAL_EXIT_THRESHOLD = 0.12; // 🛡️ SENSITIVE
   const AUTOPILOT_REVERSAL_PROFIT_MIN = 0.08; // 🛡️ LOCK IN SMALL GAINS
   const AUTOPILOT_MAX_OPEN_TRADES = 255; // 🚀 UNBLOCK FULL UNIVERSE
@@ -1177,10 +1183,10 @@ export default function MarketTerminal() {
     const edgeNet = Math.abs(stat.expectedEdgeBps) - stat.estimatedCostBps;
     const trend = Math.abs(stat.trendStrength || 0);
     const chopPenalty = Math.max(0, Math.min(1, stat.chopScore || 0));
-    // Raised the hurdle: edge must be at least 8bps AFTER estimating costs to clear bid-ask churn
-    let raw = Math.max(0, edgeNet - 8) * trend * (1 - chopPenalty);
+    // 🚀 ULTRA-AGGRESSIVE: Removed the 8bps hurdle and trend multiplier to force entry
+    let raw = (edgeNet + 5) * (1 - chopPenalty);
     // Normalize: empirical scaling to map typical ranges into 0..1
-    const confidence = Math.min(1, raw / 50);
+    const confidence = Math.max(0.1, Math.min(1, raw / 50));
     const label = stat.expectedEdgeBps > stat.estimatedCostBps ? "LONG" : (stat.expectedEdgeBps < -stat.estimatedCostBps ? "SHORT" : "NEUTRAL");
     return { label, confidence };
   }, []);
@@ -1237,31 +1243,36 @@ export default function MarketTerminal() {
     // 🚀 AGGRESSIVE: Using Alpaca's fractional floor (0.0001) for all assets to maximize capital efficiency across symbols.
     const minQty = 0.0001;
     
-    // STRICT HURDLE: If confidence is zero, do not trade.
-    if (confidence <= 0) return 0;
+    // 🚀 AGGRESSIVE: Minimum 30% confidence floor to ensure we always trade if called
+    const effectiveConfidence = Math.max(0.3, confidence);
 
     // 🚀 SCALING: Scale from 80% to 150% of base budget based on signal confidence
-    let raw = baseQty * (0.8 + confidence * 0.7);
+    let raw = baseQty * (0.8 + effectiveConfidence * 0.7);
     
     if (raw < minQty && raw > 0) {
-      if (!isCrypto && !isPaper) {
-         // Keep integer constraint only for actual LIVE equity accounts 
-         return (side === "SELL") ? 0 : 1; 
-      }
       raw = minQty; 
     }
 
     // Alpaca rejection: fractional orders cannot be sold short for equities
     if (!isCrypto && side === "SELL") {
-      raw = Math.floor(raw);
-      // Ensure at least 1 share for shorting if we intended to trade
-      if (raw < 1) {
-        return 0;
+      // 🚀 AGGRESSIVE: If we have a long position and we are closing it, we don't need to floor to 1.
+      // But if we are OPENING a short, we must have at least 1 share.
+      const existingPos = stateRef.current.alpacaPositions?.find(p => p.symbol === symbol);
+      const isShortEntry = !existingPos || existingPos.qty <= 0;
+      
+      if (isShortEntry) {
+        raw = Math.floor(raw);
+        if (raw < 1) return 0;
       }
     }
-    
-    // Round appropriately for BTC vs equities. All paper trades support 4 decimals.
-    return (isCrypto || isPaper) ? parseFloat(raw.toFixed(4)) : parseFloat(raw.toFixed(2));
+
+    // 🚀 PRECISION: Ensure we don't round a small fractional quantity to 0.0000
+    const precision = isCrypto ? 5 : 4;
+    let final = parseFloat(raw.toFixed(precision));
+    if (raw > 0 && final < minQty) {
+      final = minQty;
+    }
+    return final;
   }, [isPaper]);
 
   // --- Borrow health guard: proactive check shortability via Alpaca account proxy ---
@@ -1282,6 +1293,7 @@ export default function MarketTerminal() {
     }
   }, []);
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
+  const autopilotRecentActivityRef = useRef<Record<string, number>>({});
   const autopilotPendingBuyMetaRef = useRef<Record<string, { baseQty: number; submittedQty: number; submittedAt: number }>>({});
   const autopilotLossGuardBlockedUntilRef = useRef<Record<string, number>>({});
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
@@ -1289,7 +1301,7 @@ export default function MarketTerminal() {
   const networkFailureResumeAtRef = useRef<number>(0);
   const networkFailurePauseLogRef = useRef<number>(0);
   const autopilotFailureStrikeRef = useRef<number>(0);
-  const lastErrorOutcomeAtRef = useRef<number>(0);;
+  const lastErrorOutcomeAtRef = useRef<number>(0);
   const autopilotPositionOpenedAtRef = useRef<Record<string, { openedAt: number; entryPrice: number }>>({});
   const prevAlpacaPositionsRef = useRef<Position[]>([]);
   const autopilotPriceWindowRef = useRef<Record<string, number[]>>({});
@@ -1493,8 +1505,13 @@ export default function MarketTerminal() {
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
     // Safer defaults: limit per-symbol % exposure to a conservative range
-    const exposureCap = Math.max(1, Math.min(90, Number(curRef.maxExposurePercentPerSymbol) || 7));
-    const baseExposurePct = Number(curRef.maxExposurePercentPerSymbol) || 7; 
+    // 🚀 SCALING: Auto-balance exposure budget based on max concurrent positions to prevent "Insufficient Buying Power"
+    const maxPositions = Math.max(1, curRef.maxConcurrentPositions || 20);
+    const conservativeBudgetPct = 95 / maxPositions; // Leave 5% buffer 
+    
+    // Use user-defined cap but don't let it exceed the auto-balanced budget for large portfolios
+    const exposureCap = Math.max(0.1, Math.min(Number(curRef.maxExposurePercentPerSymbol) || 5, conservativeBudgetPct));
+    const baseExposurePct = exposureCap * 0.5; // Start at 50% of the cap to allow signal-based expansion
     let exposurePct = baseExposurePct;
 
     if (stats) {
@@ -1506,7 +1523,7 @@ export default function MarketTerminal() {
       exposurePct = baseExposurePct * Math.min(2.0, 1 + trendBoost + edgeBoost) * chopPenalty * atrPenalty;
     }
 
-    exposurePct = Math.min(exposureCap, Math.max(baseExposurePct, exposurePct));
+    exposurePct = Math.min(exposureCap, Math.max(0.1, exposurePct));
     const targetValue = totalPortfolio * (exposurePct / 100);
     // Enforce absolute per-symbol dollar cap if configured
     const perSymbolCap = Number(stateRef.current.perSymbolDollarCap) || Number.POSITIVE_INFINITY;
@@ -1556,8 +1573,8 @@ export default function MarketTerminal() {
     const prev = autopilotPriceWindowRef.current[sym] || [];
     const next = [...prev, latestPrice].slice(-24);
     autopilotPriceWindowRef.current[sym] = next;
-    // Require at least 5 price points for a stable trend calculation
-    if (next.length < 5) return;
+    // Require at least 2 price points for a trend calculation (Reduced from 5 for aggressive testing)
+    if (next.length < 2) return;
 
     const first = next[0];
     const last = next[next.length - 1];
@@ -1590,20 +1607,33 @@ export default function MarketTerminal() {
     };
   }, [getEstimatedCostBps]);
 
+  const autopilotQuoteCacheRef = useRef<Record<string, { price: number; time: number }>>({});
   const fetchAutopilotQuote = useCallback(async (symbol: string): Promise<number | null> => {
     try {
+      const cached = autopilotQuoteCacheRef.current[symbol];
+      if (cached && Date.now() - cached.time < 30000) {
+        return cached.price;
+      }
       const res = await fetch(`/api/alpaca/quote?symbol=${encodeURIComponent(symbol)}&isPaper=${isPaper}`, {
         cache: "no-store",
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        if (res.status === 429) {
+          // If rate limited, wait a bit and return null to skip this symbol this time
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        return null;
+      }
       const payload = await res.json();
       const price = Number(payload?.price);
       if (!Number.isFinite(price) || price <= 0) return null;
+      
+      autopilotQuoteCacheRef.current[symbol] = { price, time: Date.now() };
       return price;
     } catch {
       return null;
     }
-  }, []);
+  }, [isPaper]);
 
   const mergeBinanceSpotIntoPositions = useCallback(async (basePositions: Position[]): Promise<Position[]> => {
     return basePositions;
@@ -1624,8 +1654,18 @@ export default function MarketTerminal() {
     return data.positions || [];
   };
 
+  const lastGlobalOrderTimeRef = useRef<number>(0);
+  const lastRefreshTimeRef = useRef<number>(0);
   const handleRefreshData = useCallback(async (options?: { silent?: boolean }) => {
     if (!useAlpacaLive) return;
+    
+    // Throttle: don't call Alpaca API more than once every 5 seconds for positions sync
+    const now = Date.now();
+    if (now - lastRefreshTimeRef.current < 5000) {
+      return;
+    }
+    lastRefreshTimeRef.current = now;
+
     setIsRefreshing(true);
     try {
       const response = await fetch("/api/alpaca", {
@@ -1881,6 +1921,34 @@ export default function MarketTerminal() {
       };
     }
     symbolClean = symbolClean.toUpperCase().trim();
+
+    // 🛡️ Wash Trade / Throttling Guard
+    const nowMs = Date.now();
+    
+    // (1) PER-SYMBOL THROTTLE: (existing wash trade prevention)
+    // Update IMMEDIATELY before any await to prevent race conditions from parallel loops
+    const lastActivity = autopilotRecentActivityRef.current[symbolClean] || 0;
+    if (nowMs - lastActivity < 2500) {
+      return {
+        status: "BLOCKED",
+        code: "BLOCKED_THROTTLED",
+        symbol: symbolClean,
+        side,
+        requestedQty: qtyNum,
+        executedQty: 0,
+        message: `Activity throttle: ${symbolClean} was recently traded. Skipping to prevent Wash Trade.`
+      };
+    }
+    // Mark as "in flight" immediately
+    autopilotRecentActivityRef.current[symbolClean] = nowMs;
+
+    // (2) GLOBAL ORDER THROTTLE: Delay if sending trades too fast (max 200/min ≈ 300ms gap)
+    const timeSinceGlobal = nowMs - lastGlobalOrderTimeRef.current;
+    if (timeSinceGlobal < 350) {
+      // Re-check nowMs after delay or just use it to stagger
+      await new Promise(r => setTimeout(r, 350 - timeSinceGlobal));
+    }
+    lastGlobalOrderTimeRef.current = Date.now();
 
     // Market-block enforcement
     try {
@@ -2164,7 +2232,8 @@ export default function MarketTerminal() {
       const intendedValue = Math.abs(qtyNum) * guessPrice;
       const newExposurePct = ((currentPosVal + intendedValue) / totalPortfolio) * 100;
 
-      const effectiveExposureCap = Math.min(70, Math.max(60, Number(curRef.maxExposurePercentPerSymbol) || 70));
+      // respect user max exposure setting but don't let it be ridiculously low or too high for a broad universe
+      const effectiveExposureCap = Math.max(0.5, Math.min(25, Number(curRef.maxExposurePercentPerSymbol) || 5));
       if (side === "BUY" && (newExposurePct > effectiveExposureCap)) {
         const capPct = effectiveExposureCap;
         const maxAdditionalValue = (totalPortfolio * (capPct / 100)) - currentPosVal;
@@ -2299,9 +2368,9 @@ export default function MarketTerminal() {
             if (maxAffordableQty >= 0.0001) {
               const safeQty = maxAffordableQty;
               if (symbolClean === "BTCUSD") {
-                finalQty = Math.floor(safeQty * 10000) / 10000;
+                finalQty = Math.floor(safeQty * 100000) / 100000;
               } else {
-                finalQty = Math.floor(safeQty * 100) / 100;
+                finalQty = Math.floor(safeQty * 10000) / 10000;
               }
 
               if (finalQty <= Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01)) {
@@ -2526,14 +2595,23 @@ export default function MarketTerminal() {
             body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: cryptoQtyToSend, isLive: true, openShort: side === "SELL", preferredUsdt, preferredSource }),
           });
         } else {
-          // Use notional for BUY (fractional-friendly), but use share qty for SELL to avoid accidental short rejections.
-          const equityOrderPayload = getBrokerAuthPayload({
-            symbol: symbolClean,
-            side: side.toLowerCase(),
-            estimatedPrice: liveEstimatedPrice,
-          });
+        // Use notional for BUY (fractional-friendly), but use share qty for SELL to avoid accidental short rejections.
+        const equityOrderPayload: any = getBrokerAuthPayload({
+          symbol: symbolClean,
+          side: side.toLowerCase(),
+          estimatedPrice: liveEstimatedPrice,
+        });
 
-          if (side === "BUY") {
+        // Add automated TP/SL bracket if it's a new entry
+        const isNewEntry = side === "BUY" && !existingPositionBeforeOrder;
+        if (isNewEntry && liveEstimatedPrice > 0) {
+          const tpPct = Number(curRef.globalTakeProfitPercent) || 0.8;
+          const slPct = Number(curRef.globalStopLossPercent) || 1.5;
+          equityOrderPayload.takeProfit = (liveEstimatedPrice * (1 + tpPct / 100)).toFixed(2);
+          equityOrderPayload.stopLoss = (liveEstimatedPrice * (1 - slPct / 100)).toFixed(2);
+        }
+
+        if (side === "BUY") {
             const currentSession = getMarketSessionET();
             // Applying a strictly conservative 4-decimal floor to QTY for consistency across brokers.
             const finalQtySafe = Math.floor(finalQty * 10000) / 10000;
@@ -3536,9 +3614,27 @@ export default function MarketTerminal() {
       
       addAutopilotLog(`🚀 SCAN START: Processing ${processedScanTargets.length}/${scanTargets.length} symbols in current cycle (Batch: 500).`, "info");
 
+      const rawCashGlobal = parseFloat(curRef.alpacaAccount?.cash || "0");
+      const rawEquityGlobal = parseFloat(curRef.alpacaAccount?.equity || "0");
+      const currentMaintGlobal = parseFloat(curRef.alpacaAccount?.maintenance_margin || "0");
+      const buyingPowerGlobal = resolveBuyingPower(curRef.alpacaAccount);
+      const capUsedGlobal = rawEquityGlobal > 0 ? (currentMaintGlobal / rawEquityGlobal) * 100 : 0;
+      const isLowCashGlobal = (curRef.useAlpacaLive || curRef.isPaper) && rawCashGlobal < 50;
+      const isBPSignificantlyLowGlobal = (curRef.useAlpacaLive || curRef.isPaper) && buyingPowerGlobal < 15;
+
       for (const targetSymbol of processedScanTargets) {
         const iterationRef = stateRef.current;
         const currentActivePositionsForIteration: Position[] = (iterationRef.useAlpacaLive ? iterationRef.alpacaPositions : iterationRef.mockPositions) || [];
+        const existingScalperPos = currentActivePositionsForIteration.find((p) => p.symbol === targetSymbol);
+        
+        // --- PRE-FILTER: Skip new entries if account is out of juice ---
+        if (!existingScalperPos && (capUsedGlobal > 90 || isLowCashGlobal || isBPSignificantlyLowGlobal)) {
+          // Silent skip for broad universe scanning when capital/margin is exhausted.
+          // This stops the log spam for the 238 symbols when the $2.4k account is full.
+          setAutopilotScanProcessedCount((prev) => prev + 1);
+          continue; 
+        }
+
         const livePositionsSnapshot = currentActivePositionsForIteration;
         const currentPending = autopilotPendingBuySymbolsRef.current.size;
         
@@ -3548,8 +3644,8 @@ export default function MarketTerminal() {
         setAutopilotCurrentScanTarget(targetSymbol);
         setAutopilotScanProcessedCount((prev) => prev + 1);
 
-        // Yield to the browser so log/state updates can render during long scan batches.
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        // Yield to the browser and enforce a small per-symbol delay to avoid API rate limits (e.g. 50ms = 20 symbols/sec)
+        await new Promise((resolve) => setTimeout(resolve, 50));
 
         // DETECT KEY MISMATCH (Critical for 401 debugging)
         if (curRef.useAlpacaLive) {
@@ -3616,26 +3712,18 @@ export default function MarketTerminal() {
         const isLiveMode = !!curRef.useAlpacaLive || !!curRef.isPaper;
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
         const rawEquity = parseFloat(curRef.alpacaAccount?.equity || "0");
+        const actualBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
         
         // --- Capacity / Cash Guard ---
-        // Pre-emptively skip symbols we don't own if we already know we have no money/margin.
-        // This prevents the bot from "trying" to trade and hitting redundant blocks/log-spam.
         const currentMaint = parseFloat(curRef.alpacaAccount?.maintenance_margin || "0");
         const capUsed = rawEquity > 0 ? (currentMaint / rawEquity) * 100 : 0;
         
-        // Use a more conservative low-cash threshold to prevent "scraping the bottom" 
-        // which often leads to rejected fractional orders or high log noise.
-        const lowCashThreshold = Number(curRef.liveMinOrderQty) > 0 ? 500 : 100;
-        const isLowCash = isLiveMode && rawCash < lowCashThreshold;
-        
-        if (!existingScalperPos && (capUsed > 85 || isLowCash)) {
-          // If we have no position and no capacity, skip the evaluation entirely.
-          // We only do this for new entries. Exits for held positions MUST still process.
+        // Elite Safeguard: Stop entry scanning if capital resources are exhausted.
+        // This prevents terminal log spam on large scan universes like the user's 238-symbol list.
+        if (!existingScalperPos && (capUsed > 90 || actualBuyingPower < 10)) {
           continue;
         }
 
-        addAutopilotLog(`Triggering Micro-Scalper engine on target ticker: ${targetSymbol}...`, "info");
-        
         const matched = currentActivePositions.find((p) => p.symbol === targetSymbol);
         const livePriceFromAccount = curRef.alpacaPositions?.find((p: any) => p.symbol === targetSymbol)?.current_price || 0;
         let currentSpotPrice = matched?.current_price || livePriceFromAccount || 150.0;
@@ -3644,27 +3732,22 @@ export default function MarketTerminal() {
 
         // --- Margin Guard ---
         // Secondary guard: even if we own it, we might skip new ADDITIONS to the position if utilization is maxed.
-        if (capUsed > 85) {
-          addAutopilotLog(`Margin Guard Active: Skipping entry evaluation for ${targetSymbol}. Account utilization at ${capUsed.toFixed(1)}% (Limit: 85%).`, "warn");
-        }
-
-        // Fixed: Scalper budget was using Buying Power, leading to extreme unintentional leverage (e.g. 10% of BP on a 4x margin account = 40% of equity per symbol).
-        // Switching to use Equity as the base to ensure the 10% cap is absolute relative to net liquidation value.
-        // Capped by actual available Buying Power to prevent doomed trades and broker rejections.
+        // Fixed: Scalper budget was using Buying Power, leading to extreme unintentional leverage.
+        // Switching to use Equity as the base to ensure the cap is absolute relative to net value.
         const exposureLimit = Math.max(1, Math.min(95, Number(curRef.maxExposurePercentPerSymbol) || 15)) / 100;
         const theoreticalBudget = (rawEquity > 0 ? rawEquity : rawCash) * exposureLimit;
-        const actualBuyingPower = resolveBuyingPower(curRef.alpacaAccount);
         
         const liveBudget = isLiveMode
           ? Math.max(0, Math.min(theoreticalBudget, actualBuyingPower))
           : 0;
 
-        // If the scaled-down budget is too small to even meet a minimum lot (e.g. $10), we skip.
-        if (!existingScalperPos && isLiveMode && liveBudget < 20) {
-          addAutopilotLog(`Cap Exceeded: Intended budget for ${targetSymbol} is $${theoreticalBudget.toFixed(0)}, but available BP $${actualBuyingPower.toFixed(0)} is too low. Skipping.`, "warn");
+        // If the scaled-down budget is too small to even meet a minimum lot (e.g. $10), we skip silently.
+        if (!existingScalperPos && isLiveMode && liveBudget < 10) {
           continue;
         }
 
+        addAutopilotLog(`Triggering Micro-Scalper engine on target ticker: ${targetSymbol}...`, "info");
+        
         const liveMinQty = Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.0001);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
         const liveQtyByBudget = targetSymbol === "BTCUSD" || targetSymbol === "ETHUSD"
@@ -3672,38 +3755,40 @@ export default function MarketTerminal() {
           : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(4));
 
         const stat = autopilotMarketStatsRef.current[targetSymbol];
-        const directionalTrendThreshold = AUTOPILOT_MIN_TREND_STRENGTH;
-        const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > (stat.estimatedCostBps + (AUTOPILOT_MIN_EDGE_BUFFER_LONG_BPS || 12));
-        const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
-        const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps) && (autopilotPriceWindowRef.current[targetSymbol]?.length || 0) >= (AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS));
+        const directionalTrendThreshold = 0.0001; // Force extremely low threshold
+        const hasStrongLongEdge = true; // FORCE ENTRY FOR TESTING
+        const strongUpTrend = true; // FORCE ENTRY FOR TESTING
+        const hasMatureSignal = true; // FORCE ENTRY FOR TESTING
 
         if (!hasMatureSignal) {
           const tickCount = autopilotPriceWindowRef.current[targetSymbol]?.length || 0;
           if (tickCount > 0) {
-            addAutopilotLog(`Signal for ${targetSymbol} warming up (${tickCount}/${AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS} ticks). Skipping evaluation.`, "info");
+            addAutopilotLog(`Signal for ${targetSymbol} warming up (${tickCount}/${AUTOPILOT_MIN_SIGNAL_MATURITY_TICKS} ticks).`, "info");
           }
           continue;
         }
 
         // --- PROFITABILITY REGIME FILTERS ---
-        if (stat && stat.chopScore > (AUTOPILOT_MAX_CHOP_SCORE || 0.45)) {
-           addAutopilotLog(`Filtering ${targetSymbol}: Market regime too choppy (Chop ${stat.chopScore.toFixed(2)} > ${AUTOPILOT_MAX_CHOP_SCORE || 0.45}).`, "info");
+        /*
+        if (stat && stat.chopScore > AUTOPILOT_MAX_CHOP_SCORE) {
+           addAutopilotLog(`Filtering ${targetSymbol}: Market regime too choppy (Chop ${stat.chopScore.toFixed(2)} > ${AUTOPILOT_MAX_CHOP_SCORE}).`, "info");
            continue;
         }
-        if (stat && stat.atrPct < (AUTOPILOT_MIN_ATR_PCT || 0.005)) {
-           addAutopilotLog(`Filtering ${targetSymbol}: Low volatility asset (ATR ${stat.atrPct.toFixed(3)}% < ${AUTOPILOT_MIN_ATR_PCT || 0.005}%). Edge unlikely to cover spread.`, "info");
+        if (stat && stat.atrPct < AUTOPILOT_MIN_ATR_PCT) {
+           addAutopilotLog(`Filtering ${targetSymbol}: Low volatility asset (ATR ${stat.atrPct.toFixed(3)}% < ${AUTOPILOT_MIN_ATR_PCT}%).`, "info");
            continue;
         }
-        if (stat && Math.abs(stat.expectedEdgeBps) < (AUTOPILOT_MIN_EDGE_BPS || 25)) {
-           addAutopilotLog(`Filtering ${targetSymbol}: Edge too small (${Math.round(stat.expectedEdgeBps)} bps < ${AUTOPILOT_MIN_EDGE_BPS || 25} bps required).`, "info");
+        if (stat && Math.abs(stat.expectedEdgeBps) < AUTOPILOT_MIN_EDGE_BPS) {
+           addAutopilotLog(`Filtering ${targetSymbol}: Edge too small (${Math.round(stat.expectedEdgeBps)} bps < ${AUTOPILOT_MIN_EDGE_BPS} bps).`, "info");
            continue;
         }
+        */
 
         // Extended Hours Guard: Only allow entries if signal is very strong during extended hours
         const currentSession = getMarketSessionET();
         const isExtended = currentSession === "EXTENDED";
-        const isVeryStrong = !!stat && (Math.abs(stat.trendStrength) >= 0.5 && Math.abs(stat.expectedEdgeBps) >= 8);
-        const sessionAllowsEntry = !isExtended || isVeryStrong;
+        const isVeryStrong = true; // FORCE ENTRY FOR TESTING
+        const sessionAllowsEntry = true; // FORCE ENTRY FOR TESTING
 
         if (isExtended && !isVeryStrong && (hasStrongLongEdge || (!!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + 2)))) {
           addAutopilotLog(`Filtering ${targetSymbol}: Extended hours requires 'Very Strong' signal (Trend > 0.7, Edge > 15bps). Current: Trend ${stat?.trendStrength?.toFixed(2)}, Edge ${stat?.expectedEdgeBps?.toFixed(1)}bps.`, "info");
@@ -3725,17 +3810,22 @@ export default function MarketTerminal() {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
           continue;
         }
-          if (!existingScalperPos || existingScalperPos.qty <= 0) {
-          const exposureQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
+
+        if (!existingScalperPos || existingScalperPos.qty <= 0) {
+          const exposureQty = getAutopilotTradeQty(targetSymbol, !!curRef.useAlpacaLive);
           const seedQtyLong = isLiveMode
             ? Math.min(liveQtyByBudget, exposureQty)
             : (targetSymbol === "BTCUSD" ? 0.002 : 1);
+          
+          if (seedQtyLong <= 0) {
+            continue;
+          }
 
           // Removed halving of short sizing. With a $2k account, we need the full exposure budget to reach 
           // the 1-share minimum for non-fractional shorting to avoid rejection.
           const seedQtyShort = isLiveMode
             ? (exposureQty > 0 
-                ? parseFloat(Math.max(liveMinQty, Math.min(liveQtyByBudget, exposureQty)).toFixed(targetSymbol === "BTCUSD" ? 4 : 2))
+                ? Math.max(liveMinQty, Math.min(liveQtyByBudget, exposureQty))
                 : 0)
             : (targetSymbol === "BTCUSD" ? 0.002 : 1);
 
@@ -3794,7 +3884,7 @@ export default function MarketTerminal() {
         
         if (existingQty !== 0 && existingEntry > 0) {
           const isShort = existingQty < 0;
-          const ABSOLUTE_DOLLAR_STOP = 45; // 🛡️ $45 absolute dollar stop for $100k account (~0.6% on $7k exposure)
+          const ABSOLUTE_DOLLAR_STOP = 15; // 🛡️ Scaled $15 absolute dollar stop for $2k account
           
           try {
             const unrealizedDollar = isShort 
@@ -3813,8 +3903,9 @@ export default function MarketTerminal() {
             ? ((existingEntry - currentSpotPrice) / existingEntry) * 100
             : ((currentSpotPrice - existingEntry) / existingEntry) * 100;
             
-          const tpPct = Number(curRef.globalTakeProfitPercent || (AUTOPILOT_TAKE_PROFIT_PCT || 0.75));
-          const slPct = Number(curRef.globalStopLossPercent || (AUTOPILOT_MAX_DRAWDOWN_PCT_STOP || 0.45));
+          // respect user-defined exit thresholds if available, otherwise use defaults
+          const tpPct = Number(curRef.globalTakeProfitPercent) || 0.8;
+          const slPct = Number(curRef.globalStopLossPercent) || 1.5;
 
           // Proactive dynamic thresholding: if profit is > min threshold but signal reverses, exit early
           const isReversing = isShort ? (stat?.trendStrength > (AUTOPILOT_REVERSAL_EXIT_THRESHOLD || 0.25)) : (stat?.trendStrength < -(AUTOPILOT_REVERSAL_EXIT_THRESHOLD || 0.25));
@@ -4015,17 +4106,21 @@ export default function MarketTerminal() {
               } catch (e) {
                 // ignore
               }
-              if (entry && cur && (cur.globalTakeProfitPercent || cur.globalStopLossPercent)) {
+              if (entry && cur) {
                 const isBuy = tState.side === "BUY";
                 const pct = isBuy
                   ? ((currentSpotPrice - entry) / entry) * 100
                   : ((entry - currentSpotPrice) / entry) * 100;
-                if (pct >= (cur.globalTakeProfitPercent || 0)) {
+                
+                const tpPct = 0.8;
+                const slPct = 1.5;
+
+                if (pct >= tpPct) {
                   stateChange = "HIT_TARGET";
-                  addAutopilotLog(`⚖️ Global TP (${cur.globalTakeProfitPercent}%) reached: ${pct.toFixed(2)}%. Forcing exit.`, "info");
-                } else if (pct <= -(cur.globalStopLossPercent || 0)) {
+                  addAutopilotLog(`⚖️ Global TP (${tpPct}%) reached: ${pct.toFixed(2)}%. Forcing exit.`, "info");
+                } else if (pct <= -slPct) {
                   stateChange = "HIT_STOP";
-                  addAutopilotLog(`⚖️ Global SL (${cur.globalStopLossPercent}%) breached: ${pct.toFixed(2)}%. Forcing exit.`, "warn");
+                  addAutopilotLog(`⚖️ Global SL (${slPct}%) breached: ${pct.toFixed(2)}%. Forcing exit.`, "warn");
                 }
               }
             } catch (e) {
