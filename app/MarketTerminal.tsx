@@ -26,7 +26,9 @@ import {
   RotateCcw,
   Zap,
   XCircle,
-  XOctagon
+  XOctagon,
+  ChevronUp,
+  ChevronDown
 } from "lucide-react";
 
 // Types
@@ -387,8 +389,20 @@ export default function MarketTerminal() {
   const [useAlpacaLive, setUseAlpacaLive] = useState(true);
   const [allowLiveShorts, setAllowLiveShorts] = useState(true);
   const [positionsView, setPositionsView] = useState<'ALL' | 'LONGS' | 'SHORTS'>('ALL');
+  const [sortColumn, setSortColumn] = useState<'SYMBOL' | 'QTY' | 'VALUE' | 'BETA' | 'MAINTENANCE' | 'PL'>('SYMBOL');
+  const [sortDirection, setSortDirection] = useState<'ASC' | 'DESC'>('ASC');
   const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("autopilot");
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
+
+  const handleSort = (column: 'SYMBOL' | 'QTY' | 'VALUE' | 'BETA' | 'MAINTENANCE' | 'PL') => {
+    if (sortColumn === column) {
+      setSortDirection(prev => prev === 'ASC' ? 'DESC' : 'ASC');
+    } else {
+      setSortColumn(column);
+      setSortDirection('DESC'); 
+    }
+  };
+
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
 
